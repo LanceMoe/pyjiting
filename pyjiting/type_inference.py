@@ -28,7 +28,7 @@ class TypeInferencer:
 
     def visit(self, node):
         name = f'visit_{type(node).__name__}'
-        print(name)
+        # print(name)
         if hasattr(self, name):
             return getattr(self, name)(node)
         else:
@@ -92,7 +92,7 @@ class TypeInferencer:
     def visit_Var(self, node):
         ty = self.env[node.id]
         node.type = ty
-        print(ast.dump(node))
+        # print(ast.dump(node))
         return ty
 
     def visit_Return(self, node):

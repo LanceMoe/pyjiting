@@ -30,6 +30,7 @@ class ASTVisitor(ast.NodeVisitor):
 
         self._source = source
         self._ast = ast.parse(source)
+        print(ast.dump(self._ast, indent=4))
         return self.visit(self._ast)
 
     def visit_Module(self, node):
@@ -122,8 +123,8 @@ class ASTVisitor(ast.NodeVisitor):
             return Loop(target, args[0], args[1], stmts)
 
     def visit_If(self, node):
-        print('visit_If')
-        print(ast.dump(node))
+        # print('visit_If')
+        # print(ast.dump(node))
         # target = self.visit(node.target)
         # stmts = list(map(self.visit, node.body))
         # if node.iter.func.id in {'xrange', 'range'}:
@@ -138,8 +139,8 @@ class ASTVisitor(ast.NodeVisitor):
         return node
 
     def visit_Compare(self, node):
-        print('visit_Compare')
-        print(ast.dump(node))
+        # print('visit_Compare')
+        # print(ast.dump(node))
         return node
 
     def visit_AugAssign(self, node):

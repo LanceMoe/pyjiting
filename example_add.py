@@ -2,7 +2,7 @@ from pyjiting import autojit
 
 
 @autojit
-def add(a, b):
+def add(a: float, b: float) -> float:
     return a + b
 
 

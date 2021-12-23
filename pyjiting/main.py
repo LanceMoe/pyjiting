@@ -7,13 +7,13 @@ from llvmlite import ir
 from .constraint_solver import apply, compose, solve, unify
 from .core_translator import ASTVisitor
 from .llvm_codegen import LLVMCodeGen, determined
-from .pretty_printer import dump
 from .type_inference import TypeInferencer, UnderDetermined
 from .type_mapping import mangler, wrap_module
 from .type_system import *
+from ast import dump as ast_dump
 
 ### == Toplevel ==
-DEBUG = False
+DEBUG = True
 
 
 llvm.initialize()
@@ -34,8 +34,8 @@ def autojit(fn):
     transformer = ASTVisitor()
     ast = transformer(fn)
     (ty, mgu) = typeinfer(ast)
-    print('ty:', ty, '\nmgu:', mgu)
-    debug(dump(ast))
+    # print('ty:', ty, '\nmgu:', mgu)
+    debug(ast_dump(ast, indent=4))
     return specialize(ast, ty, mgu)
 
 
@@ -66,7 +66,6 @@ def specialize(ast, infer_ty, mgu):
         argtys = [apply(specializer, ty) for ty in types]
         debug('Specialized Function:', FuncType(argtys, retty))
 
-        print(retty)
         if determined(retty) or all(map(determined, argtys)):
             key = mangler(ast.fname, argtys)
             # Don't recompile after we've specialized.

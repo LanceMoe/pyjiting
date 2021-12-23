@@ -107,7 +107,7 @@ class LLVMCodeGen(object):
 
     def specialize(self, value):
         if isinstance(value.type, VarType):
-            print('specialize', value.type.s)
+            # print('specialize', value.type.s)
             return to_lltype(self.spec_types[value.type.s])
         else:
             return value.type
