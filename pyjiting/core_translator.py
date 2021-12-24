@@ -70,7 +70,7 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_FunctionDef(self, node):
         stmts = list(node.body)
         stmts = list(map(self.visit, stmts))
-        args = [Var(a.arg) for a in node.args.args]
+        args = [Var(a.arg, a.annotation.id if hasattr(a.annotation, 'id') else None) for a in node.args.args]
         res = Fun(node.name, args, stmts)
         return res
 

@@ -66,7 +66,7 @@ def specialize(ast, infer_ty, mgu):
         argtys = [apply(specializer, ty) for ty in types]
         debug('Specialized Function:', FuncType(argtys, retty))
 
-        if determined(retty) or all(map(determined, argtys)):
+        if determined(retty) and all(map(determined, argtys)):
             key = mangler(ast.fname, argtys)
             # Don't recompile after we've specialized.
             if key in function_cache:
@@ -89,6 +89,7 @@ def typeinfer(ast):
     debug(infer_ty)
     debug(mgu)
     debug(infer.constraints)
+    print('typeinfer', mgu)
     return (infer_ty, mgu)
 
 

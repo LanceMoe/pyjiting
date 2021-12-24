@@ -55,7 +55,7 @@ lltypes_map = {
 
 
 def to_lltype(ptype):
-    return lltypes_map.get(ptype, ir_int64_t)
+    return lltypes_map[ptype]
 
 
 def determined(ty):
@@ -153,7 +153,7 @@ class LLVMCodeGen(object):
         func_name = mangler(node.fname, self.argtys)
         self.start_function(func_name, self.module, rettype, argtypes)
 
-        for (ar, llarg, argty) in zip(node.args, self.function.args, self.argtys):
+        for (ar, llarg, argty) in list(zip(node.args, self.function.args, self.argtys)):
             name = ar.id
             llarg.name = name
 

@@ -78,7 +78,7 @@ def wrap_type(llvm_type):
                                        {'__module__': 'numpile'})
 
         fields = [(name, wrap_type(elem))
-                  for name, elem in zip(names, llvm_type.elements)]
+                  for name, elem in list(zip(names, llvm_type.elements))]
         setattr(ctype, '_fields_', fields)
     else:
         raise Exception(f'Unknown LLVM type {llvm_type}')

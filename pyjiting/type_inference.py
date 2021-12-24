@@ -37,7 +37,7 @@ class TypeInferencer:
     def visit_Fun(self, node):
         self.argtys = [self.fresh() for v in node.args]
         self.retty = VarType('$retty')
-        for (arg, ty) in zip(node.args, self.argtys):
+        for (arg, ty) in list(zip(node.args, self.argtys)):
             arg.type = ty
             self.env[arg.id] = ty
         list(map(self.visit, node.body))
