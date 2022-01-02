@@ -4,7 +4,7 @@ import inspect
 import types
 from textwrap import dedent
 
-from .core_lang import (PRIM_OPS, App, Assign, Fun, Index, LitBool, LitFloat,
+from .core_lang import (PRIM_OPS, App, Assign, Compare, Fun, If, Index, LitBool, LitFloat,
                         LitInt, Loop, Noop, Prim, Return, Var)
 from .type_system import *
 
@@ -82,12 +82,13 @@ class ASTVisitor(ast.NodeVisitor):
         return Return(value)
 
     def visit_Constant(self, node):
-        if isinstance(node.value, bool):
-            return LitBool(node.value)
-        elif isinstance(node.value, int):
-            return LitInt(node.value)
-        elif isinstance(node.value, float):
-            return LitFloat(node.value)
+        val = node.value
+        if isinstance(val, bool):
+            return LitBool(val)
+        elif isinstance(val, int):
+            return LitInt(val)
+        elif isinstance(val, float):
+            return LitFloat(val)
         raise NotImplementedError(node)
 
     def visit_Attribute(self, node):
@@ -112,7 +113,7 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_For(self, node):
         target = self.visit(node.target)
         stmts = list(map(self.visit, node.body))
-        if node.iter.func.id in {'xrange', 'range'}:
+        if node.iter.func.id in ['xrange', 'range']:
             args = list(map(self.visit, node.iter.args))
         else:
             raise Exception('Loop must be over range')
@@ -123,25 +124,20 @@ class ASTVisitor(ast.NodeVisitor):
             return Loop(target, args[0], args[1], stmts)
 
     def visit_If(self, node):
-        # print('visit_If')
-        # print(ast.dump(node))
-        # target = self.visit(node.target)
-        # stmts = list(map(self.visit, node.body))
-        # if node.iter.func.id in {'xrange', 'range'}:
-        #     args = list(map(self.visit, node.iter.args))
-        # else:
-        #     raise Exception('Loop must be over range')
-
-        # if len(args) == 1:   # xrange(n)
-        #     return Loop(target, LitInt(0, type=int64), args[0], stmts)
-        # elif len(args) == 2:  # xrange(n,m)
-        #     return Loop(target, args[0], args[1], stmts)
-        return node
+        test = self.visit(node.test)
+        body = list(map(self.visit, node.body))
+        orelse = list(map(self.visit, node.orelse))
+        return If(test, body, orelse)
 
     def visit_Compare(self, node):
-        # print('visit_Compare')
-        # print(ast.dump(node))
-        return node
+        def visit_op(sub_node):
+            op_str = sub_node.__class__
+            opname = PRIM_OPS[op_str]
+            return opname
+        left = self.visit(node.left)
+        ops = list(map(visit_op, node.ops))
+        comparators = list(map(self.visit, node.comparators))
+        return Compare(left, ops, comparators)
 
     def visit_AugAssign(self, node):
         if isinstance(node.op, ast.Add):

@@ -37,6 +37,24 @@ class Loop(ast.AST):
         self.body = body
 
 
+class If(ast.AST):
+    _fields = ['test', 'body', 'orelse']
+
+    def __init__(self, test, body, orelse):
+        self.test = test
+        self.body = body
+        self.orelse = orelse
+
+
+class Compare(ast.AST):
+    _fields = ['left', 'ops', 'comparators']
+
+    def __init__(self, left, ops, comparators):
+        self.left = left
+        self.ops = ops
+        self.comparators = comparators
+
+
 class App(ast.AST):
     _fields = ['fn', 'args']
 
