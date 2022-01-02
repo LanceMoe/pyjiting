@@ -103,6 +103,13 @@ class Prim(ast.AST):
         self.args = args
 
 
+class Const(ast.AST):
+    _fields = ['value']
+
+    def __init__(self, value):
+        self.value = value
+
+
 class Index(ast.AST):
     _fields = ['value', 'ix']
 

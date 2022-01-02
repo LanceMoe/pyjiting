@@ -50,7 +50,13 @@ class TypeInferencer:
         return None
 
     def visit_If(self, node):
+        self.visit(node.test)
         list(map(self.visit, node.body))
+        list(map(self.visit, node.orelse))
+
+    def visit_Compare(self, node):
+        ty = self.visit(node.left)
+        return ty
 
     def visit_LitInt(self, node):
         tv = self.fresh()
@@ -92,19 +98,23 @@ class TypeInferencer:
     def visit_Var(self, node):
         ty = self.env[node.id]
         node.type = ty
-        # print(ast.dump(node))
+        print('visit_Var', ast.dump(node))
         return ty
 
     def visit_Return(self, node):
         ty = self.visit(node.value)
         self.constraints += [(ty, self.retty)]
 
-    def visit_Constant(self, node):
+    def visit_Const(self, node):
         if isinstance(node.value, int):
-            return int64_t
+            ty = int64_t
         elif isinstance(node.value, float):
-            return float32_t
-        raise NotImplementedError(node.value)
+            ty = double64_t
+        elif isinstance(node.value, bool):
+            ty = bool_t
+        else:
+            raise NotImplementedError(node.value)
+        return ty
 
     def visit_Loop(self, node):
         self.env[node.var.id] = int64_t

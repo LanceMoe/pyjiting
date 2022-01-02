@@ -17,7 +17,7 @@ ir_int32_t = ir.IntType(32)
 ir_int64_t = ir.IntType(64)
 ir_float_t = ir.FloatType()
 ir_double_t = ir.DoubleType()
-ir_bool_t = ir.IntType(1)
+ir_bool_t = ir.IntType(32)
 ir_void_t = ir.VoidType()
 ir_void_ptr_t = ir_ptr_t(ir.IntType(8))
 
@@ -113,17 +113,20 @@ class LLVMCodeGen(object):
             return value.type
 
     def const(self, value):
-        if isinstance(value, int):
+        if isinstance(value, bool):
+            return ir.Constant(ir_bool_t, int(value))
+        elif isinstance(value, int):
             return ir.Constant(ir_int64_t, value)
         elif isinstance(value, float):
             return ir.Constant(ir_double_t, value)
-        elif isinstance(value, bool):
-            return ir.Constant(ir_bool_t, int(value))
         elif isinstance(value, str):
             # raise NotImplementedError
             return lc.Constant.stringz(value)
         else:
             raise NotImplementedError
+
+    def visit_Const(self, node):
+        return self.const(node.value)
 
     def visit_LitInt(self, node):
         ty = self.specialize(node)
@@ -376,9 +379,8 @@ class LLVMCodeGen(object):
         return None
 
     def visit_If(self, node):
-        test = self.visit(node.test)
-
         # TODO:
+        pass
 
     def visit(self, node):
         name = f'visit_{type(node).__name__}'

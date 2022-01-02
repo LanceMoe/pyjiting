@@ -4,12 +4,24 @@ import inspect
 import types
 from textwrap import dedent
 
-from .core_lang import (PRIM_OPS, App, Assign, Compare, Fun, If, Index, LitBool, LitFloat,
+from .core_lang import (PRIM_OPS, App, Assign, Compare, Const, Fun, If, Index, LitBool, LitFloat,
                         LitInt, Loop, Noop, Prim, Return, Var)
 from .type_system import *
 
 ### == Core Translator ==
 
+
+def get_type_hint(var):
+    if hasattr(var, 'annotation') and hasattr(var.annotation, 'id'):
+        ty = var.annotation.id
+        if ty == 'int64':
+            return int64_t
+        elif ty == 'float':
+            return double64_t
+        elif ty == 'bool':
+            return int64_t
+        return None
+    return None
 
 class ASTVisitor(ast.NodeVisitor):
 
@@ -65,12 +77,12 @@ class ASTVisitor(ast.NodeVisitor):
         assert len(node.targets) == 1
         var = node.targets[0].id
         value = self.visit(node.value)
-        return Assign(var, value)
+        return Assign(var, value, get_type_hint(var))
 
     def visit_FunctionDef(self, node):
         stmts = list(node.body)
         stmts = list(map(self.visit, stmts))
-        args = [Var(a.arg, a.annotation.id if hasattr(a.annotation, 'id') else None) for a in node.args.args]
+        args = [Var(a.arg, get_type_hint(a)) for a in node.args.args]
         res = Fun(node.name, args, stmts)
         return res
 
@@ -144,7 +156,7 @@ class ASTVisitor(ast.NodeVisitor):
             ref = node.target.id
             value = self.visit(node.value)
             return Assign(ref, Prim('add#', [Var(ref), value]))
-        if isinstance(node.op, ast.Mul):
+        if isinstance(node.op, ast.Mult):
             ref = node.target.id
             value = self.visit(node.value)
             return Assign(ref, Prim('mult#', [Var(ref), value]))
@@ -152,13 +164,7 @@ class ASTVisitor(ast.NodeVisitor):
             raise NotImplementedError(ast.dump(node))
 
     def visit_Constant(self, node):
-        if isinstance(node.value, int):
-            return LitInt(node.value)
-        elif isinstance(node.value, float):
-            return LitFloat(node.value)
-        elif isinstance(node.value, bool):
-            return LitBool(node.value)
-        raise NotImplementedError(ast.dump(node))
+        return Const(node.value)
 
     # def visit_Expr(self, node):
     #     return

@@ -61,12 +61,17 @@ def specialize(ast, infer_ty, mgu):
         spec_ty = FuncType(argtys=types, retty=VarType('$retty'))
         unifier = unify(infer_ty, spec_ty)
         specializer = compose(unifier, mgu)
+        debug('specializer:', specializer)
 
         retty = apply(specializer, VarType('$retty'))
         argtys = [apply(specializer, ty) for ty in types]
         debug('Specialized Function:', FuncType(argtys, retty))
 
-        if determined(retty) and all(map(determined, argtys)):
+        is_deteremined_retty = determined(retty)
+        is_deteremined_argtys = all(map(determined, argtys))
+        print('is_deteremined_retty', is_deteremined_retty)
+        print('is_deteremined_argtys', is_deteremined_argtys)
+        if is_deteremined_retty and is_deteremined_argtys:
             key = mangler(ast.fname, argtys)
             # Don't recompile after we've specialized.
             if key in function_cache:
@@ -86,10 +91,9 @@ def typeinfer(ast):
     ty = infer.visit(ast)
     mgu = solve(infer.constraints)
     infer_ty = apply(mgu, ty)
-    debug(infer_ty)
-    debug(mgu)
-    debug(infer.constraints)
-    print('typeinfer', mgu)
+    debug('infer_ty', infer_ty)
+    debug('mgu', mgu)
+    debug('infer.constraints', infer.constraints)
     return (infer_ty, mgu)
 
 

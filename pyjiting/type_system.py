@@ -77,6 +77,7 @@ CoreType = Union[GenericType, BaseType, FuncType, VarType]
 
 int32_t = BaseType('Int32')
 int64_t = BaseType('Int64')
+bool_t = BaseType('Bool')
 float32_t = BaseType('Float')
 double64_t = BaseType('Double')
 void_t = BaseType('Void')
