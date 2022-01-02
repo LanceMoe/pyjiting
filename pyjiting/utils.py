@@ -17,9 +17,9 @@ def apply(s: dict, t: CoreType) -> CoreType:
     elif isinstance(t, GenericType):
         return GenericType(apply(s, t.a), apply(s, t.b))
     elif isinstance(t, FuncType):
-        argtys = [apply(s, a) for a in t.argtys]
-        retty = apply(s, t.retty)
-        return FuncType(argtys, retty)
+        args = [apply(s, a) for a in t.args]
+        return_type = apply(s, t.return_type)
+        return FuncType(args=args, return_type=return_type)
     elif isinstance(t, VarType):
         return s.get(t.s, t)
 
@@ -36,10 +36,10 @@ def unify(x: CoreType, y: CoreType) -> dict:
     elif isinstance(x, BaseType) and isinstance(y, BaseType) and (x == y):
         return empty()
     elif isinstance(x, FuncType) and isinstance(y, FuncType):
-        if len(x.argtys) != len(y.argtys):
+        if len(x.args) != len(y.args):
             return Exception('Wrong number of arguments')
-        s1 = solve(list(zip(x.argtys, y.argtys)))
-        s2 = unify(apply(s1, x.retty), apply(s1, y.retty))
+        s1 = solve(list(zip(x.args, y.args)))
+        s2 = unify(apply(s1, x.return_type), apply(s1, y.return_type))
         return compose(s2, s1)
     elif isinstance(x, VarType):
         return bind(x.s, y)

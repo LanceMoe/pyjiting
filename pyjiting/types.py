@@ -2,10 +2,12 @@
 from functools import reduce
 from typing import Any, Union
 
+from llvmlite.ir.types import FunctionType, PointerType, Type
+
 ### == Type System ==
 
 
-class VarType(object):
+class VarType(Type):
     def __init__(self, s):
         self.s = s
 
@@ -22,7 +24,7 @@ class VarType(object):
         return self.s
 
 
-class BaseType(object):
+class BaseType(Type):
     def __init__(self, s):
         self.s = s
 
@@ -39,7 +41,7 @@ class BaseType(object):
         return self.s
 
 
-class GenericType(object):
+class GenericType(Type):
     def __init__(self, a, b):
         self.a = a
         self.b = b
@@ -57,20 +59,9 @@ class GenericType(object):
         return str(self.a) + ' ' + str(self.b)
 
 
-class FuncType(object):
-    def __init__(self, argtys, retty):
-        assert isinstance(argtys, list)
-        self.argtys = argtys
-        self.retty = retty
-
-    def __eq__(self, other):
-        if isinstance(other, FuncType):
-            return (self.argtys == other.argtys) & (self.retty == other.retty)
-        else:
-            return False
-
+class FuncType(FunctionType):
     def __str__(self):
-        return str(self.argtys) + ' -> ' + str(self.retty)
+        return str(self.args) + ' -> ' + str(self.return_type)
 
 
 CoreType = Union[GenericType, BaseType, FuncType, VarType]
@@ -83,7 +74,10 @@ double64_t = BaseType('Double')
 void_t = BaseType('Void')
 array_t = BaseType('Array')
 
+ptr_t = PointerType
+
 def make_array_type(t): return GenericType(array_t, t)
+
 
 int32_array_t = make_array_type(int32_t)
 int64_array_t = make_array_type(int64_t)
@@ -97,7 +91,7 @@ def ftv(x) -> set:
     elif isinstance(x, GenericType):
         return ftv(x.a) | ftv(x.b)
     elif isinstance(x, FuncType):
-        return reduce(set.union, set(map(ftv, x.argtys))) | ftv(x.retty)
+        return reduce(set.union, set(map(ftv, x.args))) | ftv(x.return_type)
     elif isinstance(x, VarType):
         return set([x])
 

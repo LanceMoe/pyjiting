@@ -35,13 +35,13 @@ class TypeInferencer:
             return self.generic_visit(node)
 
     def visit_Fun(self, node):
-        self.argtys = [self.fresh() for v in node.args]
-        self.retty = VarType('$retty')
-        for (arg, ty) in list(zip(node.args, self.argtys)):
+        self.args = [self.fresh() for v in node.args]
+        self.return_type = VarType('$return_type')
+        for (arg, ty) in list(zip(node.args, self.args)):
             arg.type = ty
             self.env[arg.id] = ty
         list(map(self.visit, node.body))
-        return FuncType(self.argtys, self.retty)
+        return FuncType(args=self.args, return_type=self.return_type)
 
     def visit_NoneType(self, node):
         return None
@@ -102,7 +102,7 @@ class TypeInferencer:
 
     def visit_Return(self, node):
         ty = self.visit(node.value)
-        self.constraints += [(ty, self.retty)]
+        self.constraints += [(ty, self.return_type)]
 
     def visit_Const(self, node):
         if isinstance(node.value, int):

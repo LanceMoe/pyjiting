@@ -46,6 +46,7 @@ ir_double_array_t = ir_ptr_t(array_type(ir_double_t))
 lltypes_map = {
     int32_t: ir_int32_t,
     int64_t: ir_int64_t,
+    bool_t: ir_bool_t,
     float32_t: ir_float_t,
     double64_t: ir_double_t,
     int32_array_t: ir_int32_array_t,
@@ -63,7 +64,7 @@ def determined(ty):
 
 
 class LLVMCodeGen(object):
-    def __init__(self, module, spec_types, retty, argtys):
+    def __init__(self, module, spec_types, return_type, args):
         self.module = module             # LLVM Module
         self.function = None             # LLVM Function
         self.builder = None              # LLVM Builder
@@ -71,11 +72,11 @@ class LLVMCodeGen(object):
         self.arrays = defaultdict(dict)  # Array metadata
         self.exit_block = None           # Exit block
         self.spec_types = spec_types     # Type specialization
-        self.retty = retty               # Return type
-        self.argtys = argtys             # Argument types
+        self.return_type = return_type               # Return type
+        self.args = args             # Argument types
 
-    def start_function(self, name, module, rettype, argtypes):
-        func_type = ir.FunctionType(rettype, argtypes, False)
+    def start_function(self, name, module, ir_ret_type, argtypes):
+        func_type = ir.FunctionType(ir_ret_type, argtypes, False)
         function = ir.Function(module, func_type, name)
         entry_block = function.append_basic_block('entry')
         builder = ir.IRBuilder(entry_block)
@@ -150,13 +151,13 @@ class LLVMCodeGen(object):
         pass
 
     def visit_Fun(self, node):
-        rettype = to_lltype(self.retty)
-        argtypes = list(map(to_lltype, self.argtys))
+        ir_ret_type = to_lltype(self.return_type)
+        argtypes = list(map(to_lltype, self.args))
         # Create a unique specialized name
-        func_name = mangler(node.fname, self.argtys)
-        self.start_function(func_name, self.module, rettype, argtypes)
+        func_name = mangler(node.fname, self.args)
+        self.start_function(func_name, self.module, ir_ret_type, argtypes)
 
-        for (ar, llarg, argty) in list(zip(node.args, self.function.args, self.argtys)):
+        for (ar, llarg, argty) in list(zip(node.args, self.function.args, self.args)):
             name = ar.id
             llarg.name = name
 
@@ -182,8 +183,8 @@ class LLVMCodeGen(object):
                 self.locals[name] = argref
 
         # Setup the register for return type.
-        if rettype is not ir_void_t:
-            self.locals['retval'] = self.builder.alloca(rettype, name='retval')
+        if ir_ret_type is not ir_void_t:
+            self.locals['retval'] = self.builder.alloca(ir_ret_type, name='retval')
 
         list(map(self.visit, node.body))
         self.end_function()
@@ -371,6 +372,7 @@ class LLVMCodeGen(object):
             ty = self.specialize(node)
             var = self.builder.alloca(ty, name=name)
             # print('visit_Assign', type(node.value), node.value, var, sep='???')
+            print(self.builder)
             self.builder.store(value, var)
             self.locals[name] = var
             return var

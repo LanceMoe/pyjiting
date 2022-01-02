@@ -5,14 +5,14 @@ import numpy as np
 from llvmlite import ir
 
 from .utils import apply, compose, solve, unify
-from .translator import ASTVisitor
+from .parser import ASTVisitor
 from .codegen import LLVMCodeGen, determined
 from .infer import TypeInferencer, UnderDetermined
 from .ll_types import mangler, wrap_module
 from .types import *
 from ast import dump as ast_dump
 
-### == Toplevel ==
+# == Toplevel ==
 DEBUG = True
 
 
@@ -56,31 +56,31 @@ def arg_pytype(arg):
 
 
 def specialize(ast, infer_ty, mgu):
-    def _wrapper(*args):
-        types = list(map(arg_pytype, list(args)))
-        spec_ty = FuncType(argtys=types, retty=VarType('$retty'))
+    def _wrapper(*func_args):
+        types = list(map(arg_pytype, list(func_args)))
+        spec_ty = FuncType(args=types, return_type=VarType('$return_type'))
         unifier = unify(infer_ty, spec_ty)
         specializer = compose(unifier, mgu)
         debug('specializer:', specializer)
 
-        retty = apply(specializer, VarType('$retty'))
-        argtys = [apply(specializer, ty) for ty in types]
-        debug('Specialized Function:', FuncType(argtys, retty))
+        return_type = apply(specializer, VarType('$return_type'))
+        args = [apply(specializer, ty) for ty in types]
+        debug('Specialized Function:', FuncType(args=args, return_type=return_type))
 
-        is_deteremined_retty = determined(retty)
-        is_deteremined_argtys = all(map(determined, argtys))
-        print('is_deteremined_retty', is_deteremined_retty)
-        print('is_deteremined_argtys', is_deteremined_argtys)
-        if is_deteremined_retty and is_deteremined_argtys:
-            key = mangler(ast.fname, argtys)
+        is_deteremined_return_type = determined(return_type)
+        is_deteremined_args = all(map(determined, args))
+        print('is_deteremined_return_type', is_deteremined_return_type)
+        print('is_deteremined_args', is_deteremined_args)
+        if is_deteremined_return_type and is_deteremined_args:
+            key = mangler(ast.fname, args)
             # Don't recompile after we've specialized.
             if key in function_cache:
-                return function_cache[key](*args)
+                return function_cache[key](*func_args)
             else:
-                llfunc = codegen(module, ast, specializer, retty, argtys)
-                pyfunc = wrap_module(argtys, llfunc, engine)
+                llfunc = codegen(module, ast, specializer, return_type, args)
+                pyfunc = wrap_module(args, llfunc, engine)
                 function_cache[key] = pyfunc
-                return pyfunc(*args)
+                return pyfunc(*func_args)
         else:
             raise UnderDetermined()
     return _wrapper
@@ -97,8 +97,8 @@ def typeinfer(ast):
     return (infer_ty, mgu)
 
 
-def codegen(module, ast, specializer, retty, argtys):
-    cgen = LLVMCodeGen(module, specializer, retty, argtys)
+def codegen(module, ast, specializer, return_type, args):
+    cgen = LLVMCodeGen(module, specializer, return_type, args)
     cgen.visit(ast)
 
     print(str(module))
