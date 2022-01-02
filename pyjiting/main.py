@@ -4,12 +4,12 @@ import llvmlite.binding as llvm
 import numpy as np
 from llvmlite import ir
 
-from .constraint_solver import apply, compose, solve, unify
-from .core_translator import ASTVisitor
-from .llvm_codegen import LLVMCodeGen, determined
-from .type_inference import TypeInferencer, UnderDetermined
-from .type_mapping import mangler, wrap_module
-from .type_system import *
+from .utils import apply, compose, solve, unify
+from .translator import ASTVisitor
+from .codegen import LLVMCodeGen, determined
+from .infer import TypeInferencer, UnderDetermined
+from .ll_types import mangler, wrap_module
+from .types import *
 from ast import dump as ast_dump
 
 ### == Toplevel ==

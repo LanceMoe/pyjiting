@@ -2,11 +2,7 @@ from pyjiting import autojit
 
 
 @autojit
-def add(a: float, b: float) -> float:
-    return 123.0
+def add():
+    return True
 
-
-a = 3.1415926
-b = 2.7182818
-result = add(a, b)
-print(result, a + b)
+print(add())
