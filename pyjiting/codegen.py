@@ -388,23 +388,26 @@ class LLVMCodeGen(object):
     def visit_If(self, node: If):
         test_block = self.add_block('if_cond')
         then_block = self.add_block('if_then')
-        else_block = self.add_block('if_orelse')
+        if has_else := len(node.orelse) > 0:
+            else_block = self.add_block('if_orelse')
         end_block = self.add_block('if_after')
 
         self.branch(test_block)
         self.set_block(test_block)
         test = self.visit(node.test)
-        self.builder.cbranch(test, then_block, else_block)
+        self.builder.cbranch(
+            test, then_block, else_block if has_else else end_block)
 
         self.set_block(then_block)
         list(map(self.visit, node.body))
         if self.block.terminator is None:
             self.branch(end_block)
 
-        self.set_block(else_block)
-        list(map(self.visit, node.orelse))
-        if self.block.terminator is None:
-            self.branch(end_block)
+        if has_else:
+            self.set_block(else_block)
+            list(map(self.visit, node.orelse))
+            if self.block.terminator is None:
+                self.branch(end_block)
 
         self.set_block(end_block)
 

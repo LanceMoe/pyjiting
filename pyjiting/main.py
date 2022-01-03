@@ -16,7 +16,7 @@ from textwrap import dedent
 import inspect
 
 # == Toplevel ==
-DEBUG = True
+DEBUG = False
 
 
 llvm.initialize()
