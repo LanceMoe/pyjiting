@@ -115,6 +115,8 @@ class LLVMCodeGen(object):
         return to_lltype(value.type)
 
     def const(self, value):
+        if isinstance(value, ir.Constant):
+            return value
         if isinstance(value, bool):
             return ir.Constant(ir_bool_t, int(value))
         elif isinstance(value, int):
@@ -125,6 +127,7 @@ class LLVMCodeGen(object):
             # raise NotImplementedError
             return lc.Constant.stringz(value)
         else:
+            print(value, type(value))
             raise NotImplementedError
 
     def visit_Const(self, node: Const):
@@ -228,7 +231,7 @@ class LLVMCodeGen(object):
 
         start = self.visit(node.begin)
         stop = self.visit(node.end)
-        step = 1
+        step = self.visit(node.step)
 
         # Setup the increment variable
         varname = node.var.id

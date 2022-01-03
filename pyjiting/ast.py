@@ -28,13 +28,14 @@ class Return(ast.AST):
 
 
 class Loop(ast.AST):
-    _fields = ['var', 'begin', 'end', 'body']
+    _fields = ['var', 'begin', 'end', 'body', 'step']
 
-    def __init__(self, var, begin, end, body):
+    def __init__(self, var, begin, end, body, step):
         self.var = var
         self.begin = begin
         self.end = end
         self.body = body
+        self.step = step
 
 
 class If(ast.AST):

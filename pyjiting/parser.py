@@ -132,10 +132,20 @@ class ASTVisitor(ast.NodeVisitor):
         else:
             raise RuntimeError('Loop must be over range')
 
-        if len(args) == 1:   # xrange(n)
-            return Loop(target, LitInt(0, type=int64_t), args[0], stmts)
-        elif len(args) == 2:  # xrange(n,m)
-            return Loop(target, args[0], args[1], stmts)
+        start = 0
+        stop = 0
+        step = Const(1)
+        if len(args) == 1:   # range(stop)
+            start = Const(0)
+            stop = args[0]
+        elif len(args) == 2:  # range(start,stop)
+            start = args[0]
+            stop = args[1]
+        elif len(args) == 3:  # range(start,stop,step)
+            start = args[0]
+            stop = args[1]
+            step = args[2]
+        return Loop(target, start, stop, stmts, step)
 
     def visit_If(self, node):
         test = self.visit(node.test)
