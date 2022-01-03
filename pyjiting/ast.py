@@ -121,6 +121,9 @@ class Index(ast.AST):
 class Noop(ast.AST):
     _fields = []
 
+class Break(ast.AST):
+    _fields = []
+
 
 PRIM_OPS = {
     ast.Add: 'add#',

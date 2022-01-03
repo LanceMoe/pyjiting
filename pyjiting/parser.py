@@ -4,7 +4,7 @@ import inspect
 import types
 from textwrap import dedent
 
-from .ast import (PRIM_OPS, App, Assign, Compare, Const, Fun, If, Index, LitBool, LitFloat,
+from .ast import (PRIM_OPS, App, Assign, Break, Compare, Const, Fun, If, Index, LitBool, LitFloat,
                         LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
@@ -42,7 +42,6 @@ class ASTVisitor(ast.NodeVisitor):
 
         self._source = source
         self._ast = ast.parse(source)
-        print(ast.dump(self._ast, indent=4))
         return self.visit(self._ast)
 
     def visit_Module(self, node):
@@ -89,6 +88,9 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_Pass(self, node):
         return Noop()
 
+    def visit_Break(self, node):
+        return Break()
+
     def visit_Return(self, node):
         value = self.visit(node.value)
         return Return(value)
@@ -128,7 +130,7 @@ class ASTVisitor(ast.NodeVisitor):
         if node.iter.func.id in ['xrange', 'range']:
             args = list(map(self.visit, node.iter.args))
         else:
-            raise Exception('Loop must be over range')
+            raise RuntimeError('Loop must be over range')
 
         if len(args) == 1:   # xrange(n)
             return Loop(target, LitInt(0, type=int64_t), args[0], stmts)

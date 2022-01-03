@@ -2,6 +2,8 @@
 import ast
 import string
 
+from llvmlite.ir.types import VoidType
+
 from .ast import LLVM_PRIM_OPS
 from .types import *
 
@@ -28,7 +30,6 @@ class TypeInferencer:
 
     def visit(self, node):
         name = f'visit_{type(node).__name__}'
-        # print(name)
         if hasattr(self, name):
             return getattr(self, name)(node)
         else:
@@ -44,9 +45,12 @@ class TypeInferencer:
         return FuncType(args=self.args, return_type=self.return_type)
 
     def visit_NoneType(self, node):
-        return None
+        return VoidType()
 
     def visit_Noop(self, node):
+        pass
+    
+    def visit_break(self, node):
         return None
 
     def visit_If(self, node):
@@ -123,6 +127,9 @@ class TypeInferencer:
         self.constraints += [(varty, int64_t), (
             begin, int64_t), (end, int64_t)]
         list(map(self.visit, node.body))
+    
+    def visit_Break(self, node):
+        return None
 
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))

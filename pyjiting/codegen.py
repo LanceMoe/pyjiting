@@ -7,7 +7,8 @@ from llvmlite import ir
 
 from pyjiting.ll_types import mangler
 
-from .ast import LLVM_PRIM_OPS, Var
+from .ast import (LLVM_PRIM_OPS, Assign, Break, Compare, Const, Fun, If, Index,
+                  LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
 # == LLVM Codegen ==
@@ -33,8 +34,8 @@ def array_type(elt_type):
     # If not, initialize it.
     struct_type.set_body(
         ir_ptr_t(elt_type),        # data
-        ir.IntType(32),           # dimensions
-        ir_ptr_t(ir.IntType(32)),  # shape
+        ir_int32_t,           # dimensions
+        ir_ptr_t(ir_int32_t),  # shape
     )
     return struct_type
 
@@ -108,10 +109,10 @@ class LLVMCodeGen(object):
 
     def specialize(self, value):
         if isinstance(value.type, VarType):
-            # print('specialize', value.type.s)
             return to_lltype(self.spec_types[value.type.s])
-        else:
-            return value.type
+        if isinstance(value.type, BaseType):
+            return to_lltype(value.type)
+        return to_lltype(value.type)
 
     def const(self, value):
         if isinstance(value, bool):
@@ -126,10 +127,10 @@ class LLVMCodeGen(object):
         else:
             raise NotImplementedError
 
-    def visit_Const(self, node):
+    def visit_Const(self, node: Const):
         return self.const(node.value)
 
-    def visit_LitInt(self, node):
+    def visit_LitInt(self, node: LitInt):
         ty = self.specialize(node)
         if ty is ir_double_t:
             return ir.Constant(ir_double_t, node.n)
@@ -138,7 +139,7 @@ class LLVMCodeGen(object):
         elif ty == ir_int32_t:
             return ir.Constant(ir_int32_t, node.n)
 
-    def visit_LitFloat(self, node):
+    def visit_LitFloat(self, node: LitFloat):
         ty = self.specialize(node)
         if ty is ir_double_t:
             return ir.Constant(ir_double_t, node.n)
@@ -147,10 +148,10 @@ class LLVMCodeGen(object):
         elif ty == ir_int32_t:
             return ir.Constant(ir_int32_t, node.n)
 
-    def visit_Noop(self, node):
+    def visit_Noop(self, node: Noop):
         pass
 
-    def visit_Fun(self, node):
+    def visit_Fun(self, node: Fun):
         ir_ret_type = to_lltype(self.return_type)
         argtypes = list(map(to_lltype, self.args))
         # Create a unique specialized name
@@ -184,12 +185,13 @@ class LLVMCodeGen(object):
 
         # Setup the register for return type.
         if ir_ret_type is not ir_void_t:
-            self.locals['retval'] = self.builder.alloca(ir_ret_type, name='retval')
+            self.locals['retval'] = self.builder.alloca(
+                ir_ret_type, name='retval')
 
         list(map(self.visit, node.body))
         self.end_function()
 
-    def visit_Index(self, node):
+    def visit_Index(self, node: Index):
         if isinstance(node.value, Var) and node.value.id in self.arrays:
             value = self.visit(node.value)
             ix = self.visit(node.ix)
@@ -202,20 +204,21 @@ class LLVMCodeGen(object):
             ret = self.builder.gep(value, [ix])
             return self.builder.load(ret)
 
-    def visit_Var(self, node):
+    def visit_Var(self, node: Var):
         return self.builder.load(self.locals[node.id])
 
-    def visit_Return(self, node):
+    def visit_Return(self, node: Return):
         value = self.visit(node.value)
         if value.type != ir_void_t:
             self.builder.store(value, self.locals['retval'])
         self.builder.branch(self.exit_block)
 
-    def visit_Loop(self, node):
-        init_block = self.function.append_basic_block('for.init')
-        test_block = self.function.append_basic_block('for.cond')
-        body_block = self.function.append_basic_block('for.body')
-        end_block = self.function.append_basic_block('for.end')
+    def visit_Loop(self, node: Loop):
+        init_block = self.add_block('for_init')
+        test_block = self.add_block('for_cond')
+        body_block = self.add_block('for_body')
+        end_block = self.add_block('for_after')
+        self.break_block = end_block
 
         self.branch(init_block)
         self.set_block(init_block)
@@ -248,7 +251,11 @@ class LLVMCodeGen(object):
         self.builder.branch(test_block)
         self.set_block(end_block)
 
-    def visit_Prim(self, node):
+    def visit_Break(self, node: Break):
+        if self.block.terminator is None:
+            self.branch(self.break_block)
+
+    def visit_Prim(self, node: Prim):
         if node.fn == 'shape#':
             ref = node.args[0]
             shape = self.arrays[ref.id]['shape']
@@ -325,7 +332,7 @@ class LLVMCodeGen(object):
                 return self.builder.fcmp_unordered('==', a, b)
             else:
                 return self.builder.icmp_signed('==', a, b)
-        elif node.fn == 'neq#':
+        elif node.fn == 'ne#':
             a = self.visit(node.args[0])
             b = self.visit(node.args[1])
             if a.type == ir_double_t:
@@ -355,34 +362,69 @@ class LLVMCodeGen(object):
             # return self.builder.call(pow_func, [a, b])
             raise NotImplementedError('pow#', ast.dump(node))
 
-    def visit_Assign(self, node):
+    def visit_Assign(self, node: Assign):
         # Subsequent assignment
         if node.ref in self.locals:
             name = node.ref
-            var = self.locals[name]
+            ptr = self.locals[name]
             value = self.visit(node.value)
-            self.builder.store(value, var)
-            self.locals[name] = var
-            return var
+            self.builder.store(value, ptr)
+            self.locals[name] = ptr
+            return ptr
 
         # First assignment
         else:
             name = node.ref
             value = self.visit(node.value)
             ty = self.specialize(node)
-            var = self.builder.alloca(ty, name=name)
-            # print('visit_Assign', type(node.value), node.value, var, sep='???')
-            print(self.builder)
-            self.builder.store(value, var)
-            self.locals[name] = var
-            return var
+            ptr = self.builder.alloca(ty, name=name)
+            self.builder.store(value, ptr)
+            self.locals[name] = ptr
+            return ptr
 
-    def visit_NoneType(self, node):
+    def visit_NoneType(self, node: None):
         return None
 
-    def visit_If(self, node):
-        # TODO:
-        pass
+    def visit_If(self, node: If):
+        test_block = self.add_block('if_cond')
+        then_block = self.add_block('if_then')
+        else_block = self.add_block('if_orelse')
+        end_block = self.add_block('if_after')
+
+        self.branch(test_block)
+        self.set_block(test_block)
+        test = self.visit(node.test)
+        self.builder.cbranch(test, then_block, else_block)
+
+        self.set_block(then_block)
+        list(map(self.visit, node.body))
+        if self.block.terminator is None:
+            self.branch(end_block)
+
+        self.set_block(else_block)
+        list(map(self.visit, node.orelse))
+        if self.block.terminator is None:
+            self.branch(end_block)
+
+        self.set_block(end_block)
+
+    def visit_Compare(self, node: Compare):
+        # Setup the increment variable
+        varname = 'cmp_left'
+        lf = self.visit(node.left)
+        rt = self.visit(node.comparators[0])
+        op = {
+            'eq#': '==',
+            'ne#': '!=',
+            'lt#': '<',
+            'gt#': '>',
+            'le#': '<=',
+            'ge#': '>=',
+        }.get(node.ops[0], None)
+        if op is None:
+            raise NotImplementedError(node.ops[0])
+        cond = self.builder.icmp_signed(op, lf, rt)
+        return cond
 
     def visit(self, node):
         name = f'visit_{type(node).__name__}'

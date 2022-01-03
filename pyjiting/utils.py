@@ -37,7 +37,7 @@ def unify(x: CoreType, y: CoreType) -> dict:
         return empty()
     elif isinstance(x, FuncType) and isinstance(y, FuncType):
         if len(x.args) != len(y.args):
-            return Exception('Wrong number of arguments')
+            raise RuntimeError('Wrong number of arguments')
         s1 = solve(list(zip(x.args, y.args)))
         s2 = unify(apply(s1, x.return_type), apply(s1, y.return_type))
         return compose(s2, s1)

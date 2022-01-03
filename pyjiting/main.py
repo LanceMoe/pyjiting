@@ -11,6 +11,9 @@ from .infer import TypeInferencer, UnderDetermined
 from .ll_types import mangler, wrap_module
 from .types import *
 from ast import dump as ast_dump
+from ast import parse as ast_parse
+from textwrap import dedent
+import inspect
 
 # == Toplevel ==
 DEBUG = True
@@ -31,10 +34,10 @@ engine = llvm.create_mcjit_compiler(backing_mod, target_machine)
 
 
 def autojit(fn):
+    debug(ast_dump(ast_parse(dedent(inspect.getsource(fn))), indent=4))
     transformer = ASTVisitor()
     ast = transformer(fn)
     (ty, mgu) = typeinfer(ast)
-    # print('ty:', ty, '\nmgu:', mgu)
     debug(ast_dump(ast, indent=4))
     return specialize(ast, ty, mgu)
 
@@ -52,7 +55,7 @@ def arg_pytype(arg):
     elif isinstance(arg, float):
         return double64_t
     else:
-        raise Exception(f'Type not supported: {type(arg)}')
+        raise RuntimeError('Unsupported type:', type(arg))
 
 
 def specialize(ast, infer_ty, mgu):
@@ -68,10 +71,7 @@ def specialize(ast, infer_ty, mgu):
         debug('Specialized Function:', FuncType(args=args, return_type=return_type))
 
         is_deteremined_return_type = determined(return_type)
-        is_deteremined_args = all(map(determined, args))
-        print('is_deteremined_return_type', is_deteremined_return_type)
-        print('is_deteremined_args', is_deteremined_args)
-        if is_deteremined_return_type and is_deteremined_args:
+        if is_deteremined_return_type and all(map(determined, args)):
             key = mangler(ast.fname, args)
             # Don't recompile after we've specialized.
             if key in function_cache:
@@ -101,7 +101,6 @@ def codegen(module, ast, specializer, return_type, args):
     cgen = LLVMCodeGen(module, specializer, return_type, args)
     cgen.visit(ast)
 
-    print(str(module))
     mod = llvm.parse_assembly(str(module))
     mod.verify()
 

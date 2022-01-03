@@ -11,7 +11,7 @@ from llvmlite import ir
 # the appropriate C types for our JIT'd function at runtime.
 _nptypemap = {
     'i': ctypes.c_int,
-    'l': ctypes.c_int64,
+    'l': ctypes.c_long,
     'f': ctypes.c_float,
     'd': ctypes.c_double,
 }
@@ -81,7 +81,7 @@ def wrap_type(llvm_type):
                   for name, elem in list(zip(names, llvm_type.elements))]
         setattr(ctype, '_fields_', fields)
     else:
-        raise Exception(f'Unknown LLVM type {llvm_type}')
+        raise RuntimeError(f'Unknown LLVM type {llvm_type}')
     return ctype
 
 
