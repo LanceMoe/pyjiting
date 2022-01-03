@@ -1,9 +1,9 @@
-from pyjiting import autojit
+from pyjiting import jit
 import time
 
 
 
-@autojit
+@jit
 def is_prime_jit(x: int) -> int:
     for i in range(2, x):
         if x % i == 0:

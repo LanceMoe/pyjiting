@@ -1,8 +1,8 @@
 import numpy as np
-from pyjiting import autojit
+from pyjiting import jit
 
 
-@autojit
+@jit
 def dot(a, b):
     c = 0
     n = a.shape[0]

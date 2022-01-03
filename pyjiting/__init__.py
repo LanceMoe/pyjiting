@@ -1,1 +1,1 @@
-from .main import autojit
+from .main import jit

@@ -1,7 +1,7 @@
-from pyjiting import autojit
+from pyjiting import jit
 
 
-@autojit
+@jit
 def add():
     return True
 
