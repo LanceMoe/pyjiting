@@ -178,8 +178,8 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_Constant(self, node):
         return Const(node.value)
 
-    # def visit_Expr(self, node):
-    #     return
+    def visit_Expr(self, node):
+        return None
 
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))

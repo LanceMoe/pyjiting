@@ -9,3 +9,11 @@ def add(x):
     return res
 
 print(add(100))
+
+
+@jit
+def test(a, b):
+    return a + b
+
+print(test(114, 514))
+print(test(11.4, 51.4))

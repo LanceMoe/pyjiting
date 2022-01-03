@@ -52,7 +52,8 @@ lltypes_map = {
     double64_t: ir_double_t,
     int32_array_t: ir_int32_array_t,
     int64_array_t: ir_int64_array_t,
-    double64_array_t: ir_double_array_t
+    double64_array_t: ir_double_array_t,
+    void_t: ir_void_t,
 }
 
 
@@ -115,9 +116,11 @@ class LLVMCodeGen(object):
         return to_lltype(value.type)
 
     def const(self, value):
-        if isinstance(value, ir.Constant):
+        if value is None:
+            return ir.Constant(ir_void_t, None)
+        elif isinstance(value, ir.Constant):
             return value
-        if isinstance(value, bool):
+        elif isinstance(value, bool):
             return ir.Constant(ir_bool_t, int(value))
         elif isinstance(value, int):
             return ir.Constant(ir_int64_t, value)

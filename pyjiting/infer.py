@@ -115,6 +115,8 @@ class TypeInferencer:
             ty = double64_t
         elif isinstance(node.value, bool):
             ty = bool_t
+        elif node.value is None:
+            ty = void_t
         else:
             raise NotImplementedError(node.value)
         return ty
@@ -129,6 +131,9 @@ class TypeInferencer:
         list(map(self.visit, node.body))
     
     def visit_Break(self, node):
+        return None
+    
+    def visit_Expr(self, node):
         return None
 
     def generic_visit(self, node):
