@@ -1,10 +1,11 @@
 from collections import deque
-from typing import Union
 
 from .infer import InferError, InfiniteType
-from .types import CoreType, GenericType, BaseType, FuncType, VarType, ftv
+from .types import BaseType, CoreType, FuncType, GenericType, VarType, ftv
 
-### == Constraint Solver ==
+'''
+Lang utils and constraint solver
+'''
 
 
 def empty() -> dict:

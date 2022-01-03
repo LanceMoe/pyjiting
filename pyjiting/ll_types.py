@@ -4,7 +4,9 @@ import ctypes
 import numpy as np
 from llvmlite import ir
 
-### == Type Mapping ==
+'''
+Define a mapping from NumPy dtype to C types.
+'''
 
 
 # Adapt the LLVM types to use libffi/ctypes wrapper so we can dynamically create

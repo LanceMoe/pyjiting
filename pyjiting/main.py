@@ -1,22 +1,29 @@
+import inspect
 import sys
+from ast import dump as ast_dump
+from ast import parse as ast_parse
+from textwrap import dedent
 
 import llvmlite.binding as llvm
 import numpy as np
 from llvmlite import ir
 
-from .utils import apply, compose, solve, unify
-from .parser import ASTVisitor
 from .codegen import LLVMCodeGen, determined
 from .infer import TypeInferencer, UnderDetermined
 from .ll_types import mangler, wrap_module
+from .parser import ASTVisitor
 from .types import *
-from ast import dump as ast_dump
-from ast import parse as ast_parse
-from textwrap import dedent
-import inspect
+from .utils import apply, compose, solve, unify
 
-# == Toplevel ==
+# Output debug info
 DEBUG = False
+
+
+def debug(fmt, *args):
+    if not DEBUG:
+        return
+    print('=' * 80)
+    print(fmt, *args)
 
 
 llvm.initialize()
@@ -68,7 +75,8 @@ def specialize(ast, infer_ty, mgu):
 
         return_type = apply(specializer, VarType('$return_type'))
         args = [apply(specializer, ty) for ty in types]
-        debug('Specialized Function:', FuncType(args=args, return_type=return_type))
+        debug('Specialized Function:', FuncType(
+            args=args, return_type=return_type))
 
         is_deteremined_return_type = determined(return_type)
         if is_deteremined_return_type and all(map(determined, args)):
@@ -118,9 +126,3 @@ def codegen(module, ast, specializer, return_type, args):
     debug(cgen.function)
     debug(target_machine.emit_assembly(mod))
     return cgen.function
-
-
-def debug(fmt, *args):
-    if DEBUG:
-        print('=' * 80)
-        print(fmt, *args)

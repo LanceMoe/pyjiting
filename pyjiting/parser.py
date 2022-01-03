@@ -4,11 +4,13 @@ import inspect
 import types
 from textwrap import dedent
 
-from .ast import (PRIM_OPS, App, Assign, Break, Compare, Const, Fun, If, Index, LitBool, LitFloat,
-                        LitInt, Loop, Noop, Prim, Return, Var)
+from .ast import (PRIM_OPS, App, Assign, Break, Compare, Const, Fun, If, Index,
+                  LitBool, LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
-### == Core Translator ==
+'''
+Parse a Python function into pyjiting CoreAST.
+'''
 
 
 def get_type_hint(var):
@@ -22,6 +24,7 @@ def get_type_hint(var):
             return int64_t
         return None
     return None
+
 
 class ASTVisitor(ast.NodeVisitor):
 

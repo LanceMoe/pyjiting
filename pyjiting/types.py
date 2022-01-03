@@ -1,10 +1,11 @@
-
 from functools import reduce
 from typing import Any, Union
 
 from llvmlite.ir.types import FunctionType, PointerType, Type
 
-### == Type System ==
+'''
+Basic types and type constructors
+'''
 
 
 class VarType(Type):
@@ -75,6 +76,7 @@ void_t = BaseType('Void')
 array_t = BaseType('Array')
 
 ptr_t = PointerType
+
 
 def make_array_type(t): return GenericType(array_t, t)
 

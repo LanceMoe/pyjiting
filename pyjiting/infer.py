@@ -1,4 +1,3 @@
-
 import ast
 import string
 
@@ -7,7 +6,9 @@ from llvmlite.ir.types import VoidType
 from .ast import LLVM_PRIM_OPS
 from .types import *
 
-### == Type Inference ==
+'''
+Type Inference
+'''
 
 
 def naming():
@@ -49,7 +50,7 @@ class TypeInferencer:
 
     def visit_Noop(self, node):
         pass
-    
+
     def visit_break(self, node):
         return None
 
@@ -129,10 +130,10 @@ class TypeInferencer:
         self.constraints += [(varty, int64_t), (
             begin, int64_t), (end, int64_t)]
         list(map(self.visit, node.body))
-    
+
     def visit_Break(self, node):
         return None
-    
+
     def visit_Expr(self, node):
         return None
 

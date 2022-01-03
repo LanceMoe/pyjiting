@@ -1,4 +1,3 @@
-
 import ast
 from collections import defaultdict
 
@@ -11,7 +10,9 @@ from .ast import (LLVM_PRIM_OPS, Assign, Break, Compare, Const, Fun, If, Index,
                   LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
-# == LLVM Codegen ==
+'''
+Codegen is a module that takes an AST and generates LLVM IR.
+'''
 
 ir_ptr_t = ir.PointerType
 ir_int32_t = ir.IntType(32)
