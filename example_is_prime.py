@@ -2,7 +2,6 @@ from pyjiting import jit
 import time
 
 
-
 @jit
 def is_prime_jit(x: int) -> int:
     for i in range(2, x):
@@ -16,6 +15,7 @@ def is_prime_nojit(x: int) -> int:
         if x % i == 0:
             return 0
     return 1
+
 
 is_prime_jit(1)
 is_prime_nojit(1)

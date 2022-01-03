@@ -214,10 +214,13 @@ class LLVMCodeGen(object):
         self.builder.branch(self.exit_block)
 
     def visit_Loop(self, node: Loop):
-        init_block = self.add_block('for_init')
-        test_block = self.add_block('for_cond')
-        body_block = self.add_block('for_body')
-        end_block = self.add_block('for_after')
+        if not hasattr(self, '_for_counter'):
+            self._for_counter = 0
+        self._for_counter += 1
+        init_block = self.add_block(f'for_init_{self._for_counter}')
+        test_block = self.add_block(f'for_cond_{self._for_counter}')
+        body_block = self.add_block(f'for_body_{self._for_counter}')
+        end_block = self.add_block(f'for_after_{self._for_counter}')
         self.break_block = end_block
 
         self.branch(init_block)
@@ -386,11 +389,14 @@ class LLVMCodeGen(object):
         return None
 
     def visit_If(self, node: If):
-        test_block = self.add_block('if_cond')
-        then_block = self.add_block('if_then')
+        if not hasattr(self, '_if_counter'):
+            self._if_counter = 0
+        self._if_counter += 1
+        test_block = self.add_block(f'if_cond_{self._if_counter}')
+        then_block = self.add_block(f'if_then_{self._if_counter}')
         if has_else := len(node.orelse) > 0:
-            else_block = self.add_block('if_orelse')
-        end_block = self.add_block('if_after')
+            else_block = self.add_block(f'if_orelse_{self._if_counter}')
+        end_block = self.add_block(f'if_after_{self._if_counter}')
 
         self.branch(test_block)
         self.set_block(test_block)
@@ -413,7 +419,6 @@ class LLVMCodeGen(object):
 
     def visit_Compare(self, node: Compare):
         # Setup the increment variable
-        varname = 'cmp_left'
         lf = self.visit(node.left)
         rt = self.visit(node.comparators[0])
         op = {
