@@ -3,7 +3,7 @@ import string
 
 from llvmlite.ir.types import VoidType
 
-from .ast import LLVM_PRIM_OPS
+from .ast import LLVM_PRIM_OPS, Fun
 from .types import *
 
 '''
@@ -21,10 +21,11 @@ def naming():
 
 class TypeInferencer:
 
-    def __init__(self):
+    def __init__(self, env=None):
         self.constraints = []
-        self.env = {}
+        self.env = {} if env is None else env
         self.names = naming()
+        self.org_func_name = None
 
     def fresh(self):
         return VarType('$' + next(self.names))  # New meta type variable.
@@ -37,6 +38,7 @@ class TypeInferencer:
             return self.generic_visit(node)
 
     def visit_Fun(self, node):
+        self.org_func_name = node.fname
         self.args = [self.fresh() for v in node.args]
         self.return_type = VarType('$return_type')
         for (arg, ty) in list(zip(node.args, self.args)):
@@ -134,8 +136,13 @@ class TypeInferencer:
     def visit_Break(self, node):
         return None
 
-    def visit_Expr(self, node):
-        return None
+    def visit_CallFunc(self, node):
+        list(map(self.visit, node.args))
+        # Implement recursion
+        if node.fn.id == self.org_func_name:
+            return self.return_type
+        # TODO: type inference for function calls return value.
+        return int64_t
 
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))

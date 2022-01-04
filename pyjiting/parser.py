@@ -4,7 +4,7 @@ import inspect
 import types
 from textwrap import dedent
 
-from .ast import (PRIM_OPS, App, Assign, Break, Compare, Const, Fun, If, Index,
+from .ast import (PRIM_OPS, CallFunc, Assign, Break, Compare, Const, Fun, If, Index,
                   LitBool, LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
@@ -66,7 +66,7 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_Call(self, node):
         name = self.visit(node.func)
         args = list(map(self.visit, node.args))
-        return App(name, args)
+        return CallFunc(name, args)
 
     def visit_BinOp(self, node):
         op_str = node.op.__class__

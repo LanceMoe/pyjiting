@@ -11,12 +11,13 @@ llvm.initialize_native_asmprinter()
 
 target_machine = llvm.Target.from_default_triple().create_target_machine()
 
+i64_t = ir.IntType(64)
 c_func_t = ir.FunctionType(
-    ir.IntType(64),
-    [ir.IntType(64), ir.IntType(64)]
+    i64_t,
+    [i64_t, i64_t]
 )
 c_func_t_ptr = c_func_t.as_pointer()
-i64_t = ir.IntType(64)
+
 
 
 def create_wrap_caller_module(addr):

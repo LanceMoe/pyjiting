@@ -30,12 +30,9 @@ llvm.initialize()
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 
-module = ir.Module('numpile.module')
-engine = None
+module = ir.Module('pyjiting.module')
 function_cache = {}
-
-target = llvm.Target.from_default_triple()
-target_machine = target.create_target_machine()
+target_machine = llvm.Target.from_default_triple().create_target_machine()
 backing_mod = llvm.parse_assembly('')
 engine = llvm.create_mcjit_compiler(backing_mod, target_machine)
 

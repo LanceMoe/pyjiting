@@ -6,7 +6,7 @@ from llvmlite import ir
 
 from pyjiting.ll_types import mangler
 
-from .ast import (LLVM_PRIM_OPS, Assign, Break, Compare, Const, Fun, If, Index,
+from .ast import (LLVM_PRIM_OPS, Assign, Break, CallFunc, Compare, Const, Fun, If, Index,
                   LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
@@ -75,8 +75,9 @@ class LLVMCodeGen(object):
         self.arrays = defaultdict(dict)  # Array metadata
         self.exit_block = None           # Exit block
         self.spec_types = spec_types     # Type specialization
-        self.return_type = return_type               # Return type
-        self.args = args             # Argument types
+        self.return_type = return_type   # Return type
+        self.args = args                 # Argument types
+        self.org_func_name = None        # Original function name
 
     def start_function(self, name, module, ir_ret_type, argtypes):
         func_type = ir.FunctionType(ir_ret_type, argtypes, False)
@@ -163,6 +164,7 @@ class LLVMCodeGen(object):
         argtypes = list(map(to_lltype, self.args))
         # Create a unique specialized name
         func_name = mangler(node.fname, self.args)
+        self.org_func_name = node.fname
         self.start_function(func_name, self.module, ir_ret_type, argtypes)
 
         for (ar, llarg, argty) in list(zip(node.args, self.function.args, self.args)):
@@ -440,6 +442,15 @@ class LLVMCodeGen(object):
             raise NotImplementedError(node.ops[0])
         cond = self.builder.icmp_signed(op, lf, rt)
         return cond
+
+    def visit_CallFunc(self, node: CallFunc):
+        # Implement recursion
+        if node.fn.id == self.org_func_name:
+            args = [self.visit(arg) for arg in node.args]
+            call = self.builder.call(self.function, args)
+            return call
+            # self.builder.ret(call)
+        raise NotImplementedError(f'CallFunc: {node.fn.id}')
 
     def visit(self, node):
         name = f'visit_{type(node).__name__}'

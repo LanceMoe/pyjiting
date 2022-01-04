@@ -58,7 +58,7 @@ class Compare(ast.AST):
         self.comparators = comparators
 
 
-class App(ast.AST):
+class CallFunc(ast.AST):
     _fields = ['fn', 'args']
 
     def __init__(self, fn, args):
