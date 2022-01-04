@@ -1,5 +1,7 @@
 import ast
 from collections import defaultdict
+from ctypes import c_int64, c_void_p
+import ctypes
 
 import llvmlite.llvmpy.core as lc
 from llvmlite import ir
@@ -74,6 +76,21 @@ def reg_func(func_name, func):
 
 def get_reg_func(func_name):
     return reg_known_func.get(func_name, None)
+
+
+def arg_ctype(arg):
+    if arg == ir_int64_t:
+        return c_int64
+    raise RuntimeError('Unsupported type:', arg)
+
+
+def arg_classtype(arg):
+    if arg is int:
+        return int64_t
+    elif arg is float:
+        return double64_t
+    else:
+        raise RuntimeError('Unsupported type:', arg)
 
 
 class LLVMCodeGen(object):
@@ -460,12 +477,32 @@ class LLVMCodeGen(object):
         if func_name == self.org_func_name:
             # Implement recursion
             func = self.function
-        else:
-            # Call other functions
-            func = get_reg_func(func_name)
-        if func is None:
-            raise NotImplementedError(f'CallFunc: {func_name}')
-        return self.builder.call(func, args)
+            return self.builder.call(func, args)
+
+        # Call registered functions
+        fn = get_reg_func(func_name)
+        if fn is None:
+            raise NotImplementedError(f'CallFunc: {func_name} function is not registered!')
+
+        fname = fn.__name__
+        types = fn.__annotations__
+        arg_names = fn.__code__.co_varnames
+        ir_return_type = to_lltype(arg_classtype(types['return']))
+        ir_args = [to_lltype(arg_classtype(types[arg_name])) for arg_name in arg_names]
+        wrap_caller_func_t = ir.FunctionType(ir_return_type, ir_args)
+        wrap_caller_func_t_ptr = wrap_caller_func_t.as_pointer()
+
+        # Get source function addr
+        c_args = list(map(arg_ctype, ir_args))
+        FUNC_T = ctypes.CFUNCTYPE(arg_ctype(ir_return_type), *c_args)
+        pyfunc_ptr = ctypes.cast(FUNC_T(fn), c_void_p).value
+
+        # Make llvm ir wrapper function
+        func_ptr = self.builder.inttoptr(
+            ir.Constant(ir_int64_t, pyfunc_ptr),
+            wrap_caller_func_t_ptr, name=f'{mangler(fname, args)}_ptr'
+        )
+        return self.builder.call(func_ptr, args)
 
     def visit_Expr(self, node: Expr):
         return self.visit(node.value)

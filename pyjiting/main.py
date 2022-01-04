@@ -42,32 +42,7 @@ engine = llvm.create_mcjit_compiler(backing_mod, target_machine)
 
 def reg(fn):
     fname = fn.__name__
-    types = fn.__annotations__
-    arg_names = fn.__code__.co_varnames
-    ir_return_type = to_lltype(arg_classtype(types['return']))
-    ir_args = [to_lltype(arg_classtype(types[arg_name])) for arg_name in arg_names]
-    wrap_caller_func_t = ir.FunctionType(ir_return_type, ir_args)
-    wrap_caller_func = ir.Function(
-        module, wrap_caller_func_t, name=f'wrap_{fname}')
-    wrap_caller_func_t_ptr = wrap_caller_func_t.as_pointer()
-    for i in range(len(wrap_caller_func.args)):
-        wrap_caller_func.args[i].name = arg_names[i]
-    ir_builder = ir.IRBuilder(wrap_caller_func.append_basic_block('entry'))
-
-    # Get source function addr
-    c_args = list(map(arg_ctype, ir_args))
-    FUNC_T = ctypes.CFUNCTYPE(arg_ctype(ir_return_type), *c_args)
-    pyfunc_ptr = ctypes.cast(FUNC_T(fn), c_void_p).value
-
-    # Make llvm ir wrapper function
-    func_ptr = ir_builder.inttoptr(
-        ir.Constant(ir_int64_t, pyfunc_ptr),
-        wrap_caller_func_t_ptr, name='func_ptr'
-    )
-    call = ir_builder.call(func_ptr, wrap_caller_func.args)
-    ir_builder.ret(call)
-
-    reg_func(fname, wrap_caller_func)
+    reg_func(fname, fn)
     return fn
 
 
@@ -78,12 +53,6 @@ def jit(fn):
     (ty, mgu) = typeinfer(ast)
     debug(ast_dump(ast, indent=4))
     return specialize(ast, ty, mgu)
-
-
-def arg_ctype(arg):
-    if arg == ir_int64_t:
-        return c_int64
-    raise RuntimeError('Unsupported type:', arg)
 
 
 def arg_pytype(arg):
@@ -100,15 +69,6 @@ def arg_pytype(arg):
         return double64_t
     else:
         raise RuntimeError('Unsupported type:', type(arg))
-
-
-def arg_classtype(arg):
-    if arg is int:
-        return int64_t
-    elif arg is float:
-        return double64_t
-    else:
-        raise RuntimeError('Unsupported type:', arg)
 
 
 def specialize(ast, infer_ty, mgu):
