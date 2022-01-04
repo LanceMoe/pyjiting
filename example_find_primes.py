@@ -4,9 +4,10 @@ from pyjiting import jit, reg
 all_primes = []
 
 @reg
-def do_something(x):
+def do_something(x: int) -> int:
     print(f'{x} is prime!')
     all_primes.append(x)
+    return x
 
 @jit
 def find_primes(n):

@@ -144,6 +144,9 @@ class TypeInferencer:
         # TODO: type inference for function calls return value.
         return int64_t
 
+    def visit_Expr(self, node):
+        return None
+
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))
 
