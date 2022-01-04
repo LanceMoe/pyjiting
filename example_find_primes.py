@@ -1,8 +1,9 @@
-from pyjiting import jit
+from pyjiting import jit, reg
+
 
 all_primes = []
 
-
+@reg
 def do_something(x):
     print(f'{x} is prime!')
     all_primes.append(x)

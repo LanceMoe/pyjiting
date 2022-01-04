@@ -37,6 +37,9 @@ backing_mod = llvm.parse_assembly('')
 engine = llvm.create_mcjit_compiler(backing_mod, target_machine)
 
 
+def reg(fn):
+    return fn
+
 def jit(fn):
     debug(ast_dump(ast_parse(dedent(inspect.getsource(fn))), indent=4))
     transformer = ASTVisitor()

@@ -1,1 +1,1 @@
-from .main import jit
+from .main import jit, reg
