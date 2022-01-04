@@ -145,7 +145,7 @@ class TypeInferencer:
         return int64_t
 
     def visit_Expr(self, node):
-        return None
+        self.visit(node.value)
 
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))

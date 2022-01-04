@@ -10,7 +10,7 @@ import llvmlite.binding as llvm
 import numpy as np
 from llvmlite import ir
 
-from .codegen import LLVMCodeGen, determined, ir_int64_t, to_lltype
+from .codegen import LLVMCodeGen, determined, ir_int64_t, reg_func, to_lltype
 from .infer import TypeInferencer, UnderDetermined
 from .ll_types import mangler, wrap_module
 from .parser import ASTVisitor
@@ -67,6 +67,7 @@ def reg(fn):
     call = ir_builder.call(func_ptr, wrap_caller_func.args)
     ir_builder.ret(call)
 
+    reg_func(fname, wrap_caller_func)
     return fn
 
 
@@ -154,7 +155,6 @@ def codegen(module, ast, specializer, return_type, args):
     cgen = LLVMCodeGen(module, specializer, return_type, args)
     cgen.visit(ast)
 
-    print(str(module))
     mod = llvm.parse_assembly(str(module))
     mod.verify()
 

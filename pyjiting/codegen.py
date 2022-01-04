@@ -6,13 +6,15 @@ from llvmlite import ir
 
 from pyjiting.ll_types import mangler
 
-from .ast import (LLVM_PRIM_OPS, Assign, Break, CallFunc, Compare, Const, Fun, If, Index,
+from .ast import (LLVM_PRIM_OPS, Assign, Break, CallFunc, Compare, Const, Expr, Fun, If, Index,
                   LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
 '''
 Codegen is a module that takes an AST and generates LLVM IR.
 '''
+
+reg_known_func = {}
 
 ir_ptr_t = ir.PointerType
 ir_int32_t = ir.IntType(32)
@@ -64,6 +66,14 @@ def to_lltype(ptype):
 
 def determined(ty):
     return len(ftv(ty)) == 0
+
+
+def reg_func(func_name, func):
+    reg_known_func[func_name] = func
+
+
+def get_reg_func(func_name):
+    return reg_known_func.get(func_name, None)
 
 
 class LLVMCodeGen(object):
@@ -444,13 +454,21 @@ class LLVMCodeGen(object):
         return cond
 
     def visit_CallFunc(self, node: CallFunc):
-        # Implement recursion
-        if node.fn.id == self.org_func_name:
-            args = [self.visit(arg) for arg in node.args]
-            call = self.builder.call(self.function, args)
-            return call
-            # self.builder.ret(call)
-        raise NotImplementedError(f'CallFunc: {node.fn.id}')
+        func_name = node.fn.id
+        args = [self.visit(arg) for arg in node.args]
+        func = None
+        if func_name == self.org_func_name:
+            # Implement recursion
+            func = self.function
+        else:
+            # Call other functions
+            func = get_reg_func(func_name)
+        if func is None:
+            raise NotImplementedError(f'CallFunc: {func_name}')
+        return self.builder.call(func, args)
+
+    def visit_Expr(self, node: Expr):
+        return self.visit(node.value)
 
     def visit(self, node):
         name = f'visit_{type(node).__name__}'

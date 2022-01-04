@@ -4,7 +4,7 @@ import inspect
 import types
 from textwrap import dedent
 
-from .ast import (PRIM_OPS, CallFunc, Assign, Break, Compare, Const, Fun, If, Index,
+from .ast import (PRIM_OPS, CallFunc, Assign, Break, Compare, Const, Expr, Fun, If, Index,
                   LitBool, LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
 from .types import *
 
@@ -182,7 +182,7 @@ class ASTVisitor(ast.NodeVisitor):
         return Const(node.value)
 
     def visit_Expr(self, node):
-        return None
+        return Expr(self.visit(node.value))
 
     def generic_visit(self, node):
         raise NotImplementedError(ast.dump(node))

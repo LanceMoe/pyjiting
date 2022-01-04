@@ -7,7 +7,7 @@ all_primes = []
 def do_something(x: int) -> int:
     print(f'{x} is prime!')
     all_primes.append(x)
-    return x
+    return 0
 
 @jit
 def find_primes(n):

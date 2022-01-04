@@ -121,6 +121,13 @@ class Index(ast.AST):
         self.ix = ix
 
 
+class Expr(ast.AST):
+    _fields = ['value']
+
+    def __init__(self, value):
+        self.value = value
+
+
 class Noop(ast.AST):
     _fields = []
 
