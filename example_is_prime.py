@@ -1,3 +1,4 @@
+# Is prime number test including loop and if statement test, math and compare operation test.
 from pyjiting import jit
 import time
 

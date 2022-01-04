@@ -1,3 +1,4 @@
+# Fibonacci is mainly used to show the performance of recursion.
 from pyjiting import jit
 import time
 
