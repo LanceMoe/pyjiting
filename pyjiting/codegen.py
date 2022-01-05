@@ -283,12 +283,16 @@ class LLVMCodeGen(object):
         self.set_block(body_block)
         list(map(self.visit, node.body))
 
-        # Increment the counter
-        succ = self.builder.add(self.const(step), self.builder.load(inc))
-        self.builder.store(succ, inc)
 
-        # Exit the loop
-        self.builder.branch(test_block)
+
+        
+        if self.block.terminator is None:
+            # Increment the counter
+            succ = self.builder.add(self.const(step), self.builder.load(inc))
+            self.builder.store(succ, inc)
+
+            # Exit the loop
+            self.builder.branch(test_block)
         self.set_block(end_block)
 
         # Pop the break block
