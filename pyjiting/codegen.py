@@ -105,6 +105,7 @@ class LLVMCodeGen(object):
         self.return_type = return_type   # Return type
         self.args = args                 # Argument types
         self.org_func_name = None        # Original function name
+        self.break_block_stack = []      # Break block stack
 
     def start_function(self, name, module, ir_ret_type, argtypes):
         func_type = ir.FunctionType(ir_ret_type, argtypes, False)
@@ -257,7 +258,7 @@ class LLVMCodeGen(object):
         test_block = self.add_block(f'for_cond_{self._for_counter}')
         body_block = self.add_block(f'for_body_{self._for_counter}')
         end_block = self.add_block(f'for_after_{self._for_counter}')
-        self.break_block = end_block
+        self.break_block_stack.append(end_block)
 
         self.branch(init_block)
         self.set_block(init_block)
@@ -290,9 +291,12 @@ class LLVMCodeGen(object):
         self.builder.branch(test_block)
         self.set_block(end_block)
 
+        # Pop the break block
+        self.break_block_stack.pop()
+
     def visit_Break(self, node: Break):
         if self.block.terminator is None:
-            self.branch(self.break_block)
+            self.branch(self.break_block_stack[-1])
 
     def visit_Prim(self, node: Prim):
         if node.fn == 'shape#':
@@ -482,13 +486,15 @@ class LLVMCodeGen(object):
         # Call registered functions
         fn = get_reg_func(func_name)
         if fn is None:
-            raise NotImplementedError(f'CallFunc: {func_name} function is not registered!')
+            raise NotImplementedError(
+                f'CallFunc: {func_name} function is not registered!')
 
         fname = fn.__name__
         types = fn.__annotations__
         arg_names = fn.__code__.co_varnames
         ir_return_type = to_lltype(arg_classtype(types['return']))
-        ir_args = [to_lltype(arg_classtype(types[arg_name])) for arg_name in arg_names]
+        ir_args = [to_lltype(arg_classtype(types[arg_name]))
+                   for arg_name in arg_names]
         wrap_caller_func_t = ir.FunctionType(ir_return_type, ir_args)
         wrap_caller_func_t_ptr = wrap_caller_func_t.as_pointer()
 
