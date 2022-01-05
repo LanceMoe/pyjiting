@@ -61,6 +61,11 @@ class TypeInferencer:
         list(map(self.visit, node.body))
         list(map(self.visit, node.orelse))
 
+    def visit_While(self, node):
+        self.visit(node.test)
+        list(map(self.visit, node.body))
+        list(map(self.visit, node.orelse))
+
     def visit_Compare(self, node):
         ty = self.visit(node.left)
         return ty

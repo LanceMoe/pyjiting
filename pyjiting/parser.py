@@ -5,7 +5,7 @@ import types
 from textwrap import dedent
 
 from .ast import (PRIM_OPS, CallFunc, Assign, Break, Compare, Const, Expr, Fun, If, Index,
-                  LitBool, LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
+                  LitBool, LitFloat, LitInt, Loop, Noop, Prim, Return, Var, While)
 from .types import *
 
 '''
@@ -155,6 +155,12 @@ class ASTVisitor(ast.NodeVisitor):
         body = list(map(self.visit, node.body))
         orelse = list(map(self.visit, node.orelse))
         return If(test, body, orelse)
+
+    def visit_While(self, node):
+        test = self.visit(node.test)
+        body = list(map(self.visit, node.body))
+        orelse = list(map(self.visit, node.orelse))
+        return While(test, body, orelse)
 
     def visit_Compare(self, node):
         def visit_op(sub_node):

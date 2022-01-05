@@ -4,18 +4,27 @@ Pyjiting is a experimental Python-JIT compiler, which is the product of my under
 
 ## Functions that have been implemented so far
 
-1. Backend uses llvmlite, support Python 3.9 and up, fix some errors in the numpile tutorial.
-2. Manually register the function of calling Python in the JITed function based on TypeHints.
-3. Function calls Python code(Requires manual registration, add `@reg`) also can be JIT-compiled.
-4. Implement basic functions, such as Compare operators, Mathematical operators, etc.
-5. Implement `if` expressions.
-6. Implement `for` expressions, and allow `break`.
+1. Use llvmlite as Backend, support Python 3.9 and up, fix some errors in the numpile tutorial.
+2. Support calls the Python function(code in `.py`, need manually register, just add `@reg`) from the JITed function(llvm binary) based on TypeHints. (See `example_find_primes.py`)
+3. Implement basic functions, such as Compare operators, Mathematical operators, etc.
+4. Implement `if` expressions.
+5. Implement `for` expressions, and allow `break`.
+6. Implement `while` expressions.
 7. Implement recursion.
 
 
 ## Performance
 
 You can find the source code of these test samples in the root directory.
+
+```
+My test environment:
+CPU: i7-8700K@4.8Ghz
+Memory: 32GB DDR4 3200Mhz
+OS: Windows 10 21H2 64bit
+Python 3.9.9 64bit
+LLVMLite 0.37.0
+```
 
 ```
 fib_jit(40) = 102334155 (cost time: 216.74108505249023 ms)
@@ -33,6 +42,10 @@ rate: 13.84
 
 loop_jit(100000000) = 200000000 (cost time: 0.0 ms)
 loop_nojit(100000000) = 200000000 (cost time: 7256.179332733154 ms)
+rate: Infinite
+
+test_while_jit(100000000) = 100000000 (cost time: 0.0 ms)
+test_while_nojit(100000000) = 100000000 (cost time: 7198.246292114258 ms)
 rate: Infinite
 ```
 

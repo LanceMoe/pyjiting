@@ -49,6 +49,15 @@ class If(ast.AST):
         self.orelse = orelse
 
 
+class While(ast.AST):
+    _fields = ['test', 'body', 'orelse']
+
+    def __init__(self, test, body, orelse):
+        self.test = test
+        self.body = body
+        self.orelse = orelse
+
+
 class Compare(ast.AST):
     _fields = ['left', 'ops', 'comparators']
 

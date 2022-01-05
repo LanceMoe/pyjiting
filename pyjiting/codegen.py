@@ -9,7 +9,7 @@ from llvmlite import ir
 from pyjiting.ll_types import mangler
 
 from .ast import (LLVM_PRIM_OPS, Assign, Break, CallFunc, Compare, Const, Expr, Fun, If, Index,
-                  LitFloat, LitInt, Loop, Noop, Prim, Return, Var)
+                  LitFloat, LitInt, Loop, Noop, Prim, Return, Var, While)
 from .types import *
 
 '''
@@ -283,9 +283,6 @@ class LLVMCodeGen(object):
         self.set_block(body_block)
         list(map(self.visit, node.body))
 
-
-
-        
         if self.block.terminator is None:
             # Increment the counter
             succ = self.builder.add(self.const(step), self.builder.load(inc))
@@ -458,6 +455,35 @@ class LLVMCodeGen(object):
             list(map(self.visit, node.orelse))
             if self.block.terminator is None:
                 self.branch(end_block)
+
+        self.set_block(end_block)
+
+    def visit_While(self, node: While):
+        if not hasattr(self, '_while_counter'):
+            self._while_counter = 0
+        self._while_counter += 1
+        test_block = self.add_block(f'while_cond_{self._while_counter}')
+        then_block = self.add_block(f'while_then_{self._while_counter}')
+        if has_else := len(node.orelse) > 0:
+            else_block = self.add_block(f'while_orelse_{self._while_counter}')
+        end_block = self.add_block(f'while_after_{self._while_counter}')
+
+        self.branch(test_block)
+        self.set_block(test_block)
+        test = self.visit(node.test)
+        self.builder.cbranch(
+            test, then_block, else_block if has_else else end_block)
+
+        self.set_block(then_block)
+        list(map(self.visit, node.body))
+        if self.block.terminator is None:
+            self.branch(test_block)
+
+        if has_else:
+            self.set_block(else_block)
+            list(map(self.visit, node.orelse))
+            if self.block.terminator is None:
+                self.branch(test_block)
 
         self.set_block(end_block)
 
