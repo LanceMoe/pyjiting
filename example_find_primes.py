@@ -3,7 +3,7 @@ from pyjiting import jit, reg
 import time
 
 all_primes = []
-
+all_primes_nojit = []
 
 # jit
 @reg
@@ -28,7 +28,7 @@ def find_primes_jit(n):
 # nojit
 def do_something_nojit(x: int) -> int:
     print(f'{x} is prime!')
-    all_primes.append(x)
+    all_primes_nojit.append(x)
     return 0
 
 
@@ -60,3 +60,4 @@ nojit_cost = cost_time_ms
 
 print('find_primes_jit(100000) =', result, f'(cost time: {jit_cost} ms)')
 print('find_primes_nojit(100000) =', result, f'(cost time: {nojit_cost} ms)')
+print('rate:', nojit_cost / jit_cost)

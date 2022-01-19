@@ -27,18 +27,17 @@ LLVMLite 0.37.0
 ```
 
 ```
-fib_jit(40) = 102334155 (cost time: 216.74108505249023 ms)
-fib_nojit(40) = 102334155 (cost time: 27159.422159194946 ms)
-rate: 125.31
+fib_jit(40) = 102334155 (cost time: 169.3246364593506 ms)
+fib_nojit(40) = 102334155 (cost time: 26464.3042087554929 ms)
+rate: 156.29328821921743
 
+find_primes_jit(100000) = 0 (cost time: 3358.8650226593018 ms)
+find_primes_nojit(100000) = 0 (cost time: 37986.81926727295 ms)
+rate: 11.309421191685097
 
-find_primes_jit(100000) = 0 (cost time: 3669.861316680908 ms)
-find_primes_nojit(100000) = 0 (cost time: 38279.1805267334 ms)
-rate: 10.43
-
-is_prime_jit(169941229) = True (cost time: 979.4812202453613 ms)
-is_prime_nojit(169941229) = True (cost time: 13560.30797958374 ms)
-rate: 13.84
+is_prime_jit(169941229) = True (cost time: 958.0211639404297 ms)
+is_prime_nojit(169941229) = True (cost time: 13279.908418655396 ms)
+rate: 13.861811114938112
 
 loop_jit(100000000) = 200000000 (cost time: 0.0 ms)
 loop_nojit(100000000) = 200000000 (cost time: 7256.179332733154 ms)
