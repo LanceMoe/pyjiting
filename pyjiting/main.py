@@ -1,135 +1,77 @@
-import ctypes
-import inspect
 import sys
-from ast import dump as ast_dump
-from ast import parse as ast_parse
-from ctypes import c_int64, c_void_p
-from textwrap import dedent
 
 import llvmlite.binding as llvm
 import numpy as np
 from llvmlite import ir
 
-from .codegen import LLVMCodeGen, determined, ir_int64_t, reg_func, to_lltype
-from .infer import TypeInferencer, UnderDetermined
+from .codegen import LLVMCodeGen
+from .errors import InferError
+from .infer import TypeInferencer
 from .ll_types import mangler, wrap_module
 from .parser import ASTVisitor
-from .types import *
-from .utils import apply, compose, solve, unify
+from .registry import register, signatures
+from .types import bool_t, double64_t, float32_t, int32_t, int64_t, make_array_type
 
-# Output debug info
+
 DEBUG = False
-
-
-def debug(fmt, *args):
-    if not DEBUG:
-        return
-    print('=' * 80)
-    print(fmt, *args)
-
-
-# Note: llvmlite.binding.initialize() is deprecated since llvmlite 0.44 and now
-# raises a RuntimeError. The native target/asmprinter initialization is still
-# required before any code generation can happen.
+function_cache = {}
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
-
-module = ir.Module('pyjiting.module')
-function_cache = {}
-
 target_machine = llvm.Target.from_default_triple().create_target_machine()
-backing_mod = llvm.parse_assembly('')
-engine = llvm.create_mcjit_compiler(backing_mod, target_machine)
+engine = llvm.create_mcjit_compiler(llvm.parse_assembly(''), target_machine)
 
 
-def reg(fn):
-    fname = fn.__name__
-    reg_func(fname, fn)
-    return fn
+def debug(*values):
+    if DEBUG: print(*values)
 
 
-def jit(fn):
-    debug(ast_dump(ast_parse(dedent(inspect.getsource(fn))), indent=4))
-    transformer = ASTVisitor()
-    ast = transformer(fn)
-    (ty, mgu) = typeinfer(ast)
-    debug(ast_dump(ast, indent=4))
-    return specialize(ast, ty, mgu)
+def reg(fn): return register(fn)
 
 
 def arg_pytype(arg):
     if isinstance(arg, np.ndarray):
-        if arg.dtype == np.dtype('int64'):
-            return make_array_type(int64_t)
-        elif arg.dtype == np.dtype('double'):
-            return make_array_type(double64_t)
-        elif arg.dtype == np.dtype('float'):
-            return make_array_type(float32_t)
-    elif isinstance(arg, int) and arg <= sys.maxsize:
-        return int64_t
-    elif isinstance(arg, float):
-        return double64_t
-    else:
-        raise RuntimeError('Unsupported type:', type(arg))
+        dtype_map = {np.dtype(np.int32): int32_t, np.dtype(np.int64): int64_t, np.dtype(np.float32): float32_t, np.dtype(np.float64): double64_t}
+        try: return make_array_type(dtype_map[np.dtype(arg.dtype)])
+        except KeyError as error: raise TypeError(f'Unsupported ndarray dtype: {arg.dtype}') from error
+    if isinstance(arg, (bool, np.bool_)): return bool_t
+    if isinstance(arg, np.int32): return int32_t
+    if isinstance(arg, np.int64): return int64_t
+    if isinstance(arg, np.float32): return float32_t
+    if isinstance(arg, np.floating) or isinstance(arg, float): return double64_t
+    if isinstance(arg, int) and -sys.maxsize - 1 <= arg <= sys.maxsize: return int64_t
+    raise TypeError(f'Unsupported type: {type(arg).__name__}')
 
 
-def specialize(ast, infer_ty, mgu):
-    def _wrapper(*func_args):
-        types = list(map(arg_pytype, list(func_args)))
-        spec_ty = FuncType(args=types, return_type=VarType('$return_type'))
-        unifier = unify(infer_ty, spec_ty)
-        specializer = compose(unifier, mgu)
-        debug('specializer:', specializer)
-
-        return_type = apply(specializer, VarType('$return_type'))
-        args = [apply(specializer, ty) for ty in types]
-        debug('Specialized Function:', FuncType(
-            args=args, return_type=return_type))
-
-        is_deteremined_return_type = determined(return_type)
-        if is_deteremined_return_type and all(map(determined, args)):
-            key = mangler(ast.fname, args)
-            # Don't recompile after we've specialized.
-            if key in function_cache:
-                return function_cache[key](*func_args)
-            else:
-                llfunc = codegen(module, ast, specializer, return_type, args)
-                pyfunc = wrap_module(args, llfunc, engine)
-                function_cache[key] = pyfunc
-                return pyfunc(*func_args)
-        else:
-            raise UnderDetermined()
-    return _wrapper
+def typeinfer(tree, arg_types, registry=None):
+    return TypeInferencer(arg_types, registry or signatures()).visit(tree)
 
 
-def typeinfer(ast):
-    infer = TypeInferencer()
-    ty = infer.visit(ast)
-    mgu = solve(infer.constraints)
-    infer_ty = apply(mgu, ty)
-    debug('infer_ty', infer_ty)
-    debug('mgu', mgu)
-    debug('infer.constraints', infer.constraints)
-    return (infer_ty, mgu)
+def compile_specialization(tree, arg_types):
+    function_type = typeinfer(tree, arg_types)
+    key = mangler(tree.fname, arg_types)
+    if key in function_cache: return function_cache[key]
+    module = ir.Module(name=f'pyjiting.{key}')
+    module.triple = llvm.get_default_triple()
+    llfunc = LLVMCodeGen(module, function_type.return_type, arg_types).visit(tree)
+    binding_module = llvm.parse_assembly(str(module)); binding_module.verify()
+    pto = llvm.create_pipeline_tuning_options(speed_level=3); pto.loop_vectorization = True
+    pass_builder = llvm.create_pass_builder(target_machine, pto)
+    pass_builder.getModulePassManager().run(binding_module, pass_builder)
+    engine.add_module(binding_module); engine.finalize_object()
+    wrapper = wrap_module(arg_types, llfunc, engine); function_cache[key] = wrapper
+    debug(module)
+    return wrapper
 
 
-def codegen(module, ast, specializer, return_type, args):
-    cgen = LLVMCodeGen(module, specializer, return_type, args)
-    cgen.visit(ast)
+def jit(fn):
+    tree = ASTVisitor()(fn)
+    def wrapper(*args): return compile_specialization(tree, [arg_pytype(arg) for arg in args])(*args)
+    wrapper.__name__, wrapper.__doc__, wrapper.__wrapped__ = fn.__name__, fn.__doc__, fn
+    return wrapper
 
-    mod = llvm.parse_assembly(str(module))
-    mod.verify()
 
-    # New pass manager (llvmlite >= 0.44): build per-module default pipeline
-    # at opt level 3 with loop vectorization enabled.
-    pto = llvm.create_pipeline_tuning_options(speed_level=3)
-    pto.loop_vectorization = True
-    pb = llvm.create_pass_builder(target_machine, pto)
-    pm = pb.getModulePassManager()
-    pm.run(mod, pb)
-
-    engine.add_module(mod)
-
-    debug(cgen.function)
-    debug(target_machine.emit_assembly(mod))
-    return cgen.function
+def codegen(module, ast, specializer=None, return_type=None, args=None):
+    """Compatibility entry point used by external callers."""
+    if args is None: raise InferError('codegen requires concrete argument types')
+    function_type = typeinfer(ast, args)
+    return LLVMCodeGen(module, return_type or function_type.return_type, args).visit(ast)

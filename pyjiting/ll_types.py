@@ -1,116 +1,65 @@
-
 import ctypes
 
 import numpy as np
 from llvmlite import ir
 
-'''
-Define a mapping from NumPy dtype to C types.
-'''
+
+_scalar_ctypes = {1: ctypes.c_int8, 8: ctypes.c_int8, 16: ctypes.c_int16, 32: ctypes.c_int32, 64: ctypes.c_int64}
+_numpy_ctypes = {np.dtype(np.int32): ctypes.c_int32, np.dtype(np.int64): ctypes.c_int64, np.dtype(np.float32): ctypes.c_float, np.dtype(np.float64): ctypes.c_double}
 
 
-# Adapt the LLVM types to use libffi/ctypes wrapper so we can dynamically create
-# the appropriate C types for our JIT'd function at runtime.
-_nptypemap = {
-    'i': ctypes.c_int,
-    'l': ctypes.c_long,
-    'f': ctypes.c_float,
-    'd': ctypes.c_double,
-}
+def type_repr(ty):
+    from .types import GenericType, array_t
+    if isinstance(ty, GenericType) and ty.a == array_t: return f'arr_{type_repr(ty.b)}'
+    return {'Int32': 'i32', 'Int64': 'i64', 'Bool': 'bool', 'Float': 'f32', 'Double': 'f64', 'Void': 'void'}.get(str(ty), str(ty).lower())
 
 
-def mangler(fname: str, sig) -> str:
-    return fname + str(hash(tuple(sig)))
-
-
-def wrap_module(sig, llfunc, engine):
-    pfunc = wrap_function(llfunc, engine)
-    dispatch = dispatcher(pfunc)
-    return dispatch
-
-
-def wrap_function(func, engine):
-    args = func.type.pointee.args
-    ret_type = func.type.pointee.return_type
-    ret_ctype = wrap_type(ret_type)
-    args_ctypes = list(map(wrap_type, args))
-
-    functype = ctypes.CFUNCTYPE(ret_ctype, *args_ctypes)
-    fptr = engine.get_function_address(func.name)
-
-    cfunc = functype(fptr)
-    cfunc.__name__ = func.name
-    return cfunc
+def mangler(fname, signature): return fname + '__' + '_'.join(type_repr(ty) for ty in signature)
 
 
 def wrap_type(llvm_type):
-    if isinstance(llvm_type, ir.IntType):
-        ctype = getattr(ctypes, 'c_int'+str(llvm_type.width))
-    elif isinstance(llvm_type, ir.DoubleType):
-        ctype = ctypes.c_double
-    elif isinstance(llvm_type, ir.FloatType):
-        ctype = ctypes.c_float
-    elif isinstance(llvm_type, ir.VoidType):
-        ctype = None
-    elif isinstance(llvm_type, ir.PointerType):
-        pointee = llvm_type.pointee
-        if isinstance(pointee, ir.IntType):
-            width = pointee.width
-            if width == 8:
-                ctype = ctypes.c_char_p
-            else:
-                ctype = ctypes.POINTER(wrap_type(pointee))
-        elif isinstance(pointee, ir.VoidType):
-            ctype = ctypes.c_void_p
-        else:
-            ctype = ctypes.POINTER(wrap_type(pointee))
-    elif isinstance(llvm_type, ir.IdentifiedStructType):
-        struct_name = llvm_type.name.split('.')[-1]
-        struct_type = None
-
-        if struct_type and issubclass(struct_type, ctypes.Structure):
-            return struct_type
-
-        if hasattr(struct_type, '_fields_'):
-            names = struct_type._fields_
-        else:
-            names = ['field'+str(n) for n in range(len(llvm_type.elements))]
-
-        ctype = type(ctypes.Structure)(struct_name, (ctypes.Structure,),
-                                       {'__module__': 'numpile'})
-
-        fields = [(name, wrap_type(elem))
-                  for name, elem in list(zip(names, llvm_type.elements))]
-        setattr(ctype, '_fields_', fields)
-    else:
-        raise RuntimeError(f'Unknown LLVM type {llvm_type}')
-    return ctype
+    if isinstance(llvm_type, ir.IntType): return _scalar_ctypes[llvm_type.width]
+    if isinstance(llvm_type, ir.DoubleType): return ctypes.c_double
+    if isinstance(llvm_type, ir.FloatType): return ctypes.c_float
+    if isinstance(llvm_type, ir.VoidType): return None
+    if isinstance(llvm_type, ir.PointerType): return ctypes.POINTER(wrap_type(llvm_type.pointee))
+    if isinstance(llvm_type, ir.IdentifiedStructType):
+        cached = getattr(llvm_type, '_pyjiting_ctype', None)
+        if cached is not None: return cached
+        fields = [('data', wrap_type(llvm_type.elements[0])), ('ndim', ctypes.c_int64), ('shape', ctypes.POINTER(ctypes.c_int64)), ('strides', ctypes.POINTER(ctypes.c_int64))]
+        ctype = type(llvm_type.name.replace('.', '_'), (ctypes.Structure,), {'_fields_': fields})
+        setattr(llvm_type, '_pyjiting_ctype', ctype)
+        return ctype
+    raise RuntimeError(f'Unknown LLVM type {llvm_type}')
 
 
-def wrap_ndarray(na):
-    # For NumPy arrays grab the underlying data pointer. Doesn't copy.
-    ctype = _nptypemap[na.dtype.char]
-    _shape = list(na.shape)
-    data = na.ctypes.data_as(ctypes.POINTER(ctype))
-    dims = len(na.strides)
-    shape = (ctypes.c_int*dims)(*_shape)
-    return (data, dims, shape)
+def wrap_ndarray(value):
+    dtype = np.dtype(value.dtype)
+    if dtype not in _numpy_ctypes: raise TypeError(f'unsupported ndarray dtype {dtype}')
+    data = value.ctypes.data_as(ctypes.POINTER(_numpy_ctypes[dtype]))
+    shape = (ctypes.c_int64 * value.ndim)(*value.shape)
+    strides = (ctypes.c_int64 * value.ndim)(*(stride // value.dtype.itemsize for stride in value.strides))
+    return data, value.ndim, shape, strides
 
 
 def wrap_arg(arg, value):
     if isinstance(value, np.ndarray):
-        ndarray = arg._type_
-        data, dims, shape = wrap_ndarray(value)
-        return ndarray(data, dims, shape)
-    else:
-        return value
+        data, ndim, shape, strides = wrap_ndarray(value)
+        return arg._type_(data, ndim, shape, strides)
+    return value
+
+
+def wrap_function(func, engine):
+    args, ret_type = func.type.pointee.args, func.type.pointee.return_type
+    cfunc = ctypes.CFUNCTYPE(wrap_type(ret_type), *(wrap_type(arg) for arg in args))(engine.get_function_address(func.name))
+    cfunc.__name__ = func.name
+    return cfunc
 
 
 def dispatcher(fn):
-    def _call_closure(*args):
-        cargs = list(fn._argtypes_)
-        pargs = list(args)
-        rargs = list(map(wrap_arg, cargs, pargs))
-        return fn(*rargs)
-    _call_closure.__name__ = fn.__name__
-    return _call_closure
+    def call(*args): return fn(*(wrap_arg(arg, value) for arg, value in zip(fn._argtypes_, args)))
+    call.__name__ = fn.__name__
+    return call
+
+
+def wrap_module(sig, llfunc, engine): return dispatcher(wrap_function(llfunc, engine))

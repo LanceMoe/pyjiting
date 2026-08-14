@@ -47,18 +47,29 @@ Pyjiting compiles a function to native code when it is first called. A function 
 
 - [x] LLVM backend via llvmlite, optimized at `-O3` with loop vectorization (new pass manager).
 - [x] Automatic type specialization on first call; a separate native binary is compiled per argument-type combination (e.g. `int` vs `float`).
-- [x] Arithmetic (`+ - * / %` …), comparison and boolean operators on scalars.
-- [x] Control flow: `if` expressions, `for` loops over `range` (with `break`), and `while` loops.
+- [x] Arithmetic (`+ - * / // % **`), unary negation, scalar comparison and short-circuit boolean operators.
+- [x] Control flow: `if`, `for` loops over `range` (with `break`, `continue`, negative steps and `else`), and `while` loops with `else`.
 - [x] Recursion (self-calls compile to native calls).
-- [x] Calling ordinary Python functions from JITed native code through libffi-style callbacks — register them with the `@reg` decorator and annotate their types (see `example_find_primes.py`).
-- [x] Scalar types: `int` (i64), `float` (f64), `bool`; NumPy array types with element access.
+- [x] Calling ordinary Python functions from JITed native code through libffi-style callbacks — register them with the `@reg` decorator and annotate their types (see `examples/example_find_primes.py`).
+- [x] Scalar types: `int` (i64), `float` (f64), `bool`; int32/int64/float32/float64 NumPy arrays with strided multidimensional access and assignment.
+- [x] Deterministic specialization names and an isolated LLVM module per specialization.
 
+### Numeric and array semantics
+
+pyjiting uses fixed-width Int32/Int64 values, not arbitrary-precision Python integers. Mixed scalar operations use deterministic promotion: int32 widens to int64 as needed, float32 widens to float64 when combined with int64 or float64, and `/` produces a floating result. Assignment allows widening only, so a Python `int` must be explicitly converted to `np.int32` before storing into an int32 array.
+
+Arrays use a stable `data/ndim/shape/strides` ABI. Element reads and writes support multidimensional, transposed, sliced and negative-stride NumPy views. Bounds checks, array creation, broadcasting and whole-array ufunc operations are deliberately not supported.
 ## Requirements
-
 - Python >= 3.12
 - llvmlite >= 0.44 (new LLVM pass manager API)
 - numpy
 
+## Development
+
+```bash
+pip install -e .[dev]
+pytest -q
+```
 ## Usage
 
 ### JIT compile a function
@@ -93,10 +104,20 @@ print(test(114, 514))    # 628   (int64 specialization)
 print(test(11.4, 51.4))  # 62.8  (double specialization)
 ```
 
+### `@jit` and `@reg`
+
+`@jit` marks a function as a compilation target. Its source is parsed when the decorator runs, then it is specialized and compiled to native code on the first call for each argument-type signature. Use it for the numerical and control-flow-heavy part of a workload.
+
+`@reg` marks an ordinary Python function as a callback that JIT-compiled code may invoke. It is not compiled by pyjiting: the native function crosses the ctypes callback boundary to execute the original Python implementation. Use it for reporting, logging, or existing Python-only operations. Registered functions need supported scalar parameter and return annotations: `int`, `float`, `bool`, `np.int32`, `np.int64`, `np.float32`, or `np.float64`. They must not raise an exception across the callback boundary.
+
+| Decorator | Role | Runs as | Typical use |
+|---|---|---|---|
+| `@jit` | Compiles a function | LLVM-generated native code | Numeric kernels, loops, recursion |
+| `@reg` | Registers a callable for JIT code | Original Python function through ctypes | Logging, reporting, Python-only integration |
+
 ### Call Python code from JITed functions
 
-Plain Python functions can be called from native code. They must be registered with `@reg` and fully type-annotated (`int` / `float`):
-
+Plain Python functions can be called from native code when registered with `@reg` and fully annotated with supported scalar types:
 ```python
 from pyjiting import jit, reg
 
@@ -121,12 +142,17 @@ def find_primes(n):
 ### Run the benchmarks
 
 ```bash
-uv run example_fib.py
-uv run example_find_primes.py
-uv run example_is_prime.py
-uv run example_loop.py
-uv run example_while.py
-uv run example_generic.py
+uv run examples/example_fib.py
+uv run examples/example_find_primes.py
+uv run examples/example_is_prime.py
+uv run examples/example_loop.py
+uv run examples/example_while.py
+uv run examples/example_generic.py
+uv run examples/example_bool_ops.py
+uv run examples/example_float_math.py
+uv run examples/example_array_2d.py
+uv run examples/example_annotations.py
+uv run examples/example_mixed_types.py
 ```
 
 ## Performance
@@ -197,10 +223,11 @@ pyjiting/
 This is a research/educational project, not a production JIT. Among others:
 
 - No garbage collection integration; only a small statically-typed subset of Python is supported.
-- `for` loops must iterate over `range`; `pow` (`**`) is not yet implemented in codegen.
-- Registered (`@reg`) functions must be annotated with `int`/`float` types only.
-- Type inference must be able to determine all types from the arguments, otherwise `UnderDetermined` is raised.
-
+- `for` loops must iterate over `range`; a constant zero step is rejected during compilation.
+- Runtime division by zero and a dynamic zero range step are not yet translated to Python exceptions; they remain excluded until the planned error-status ABI is added.
+- Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.
+- Registered (`@reg`) functions need supported scalar annotations and must not raise across the callback boundary.
+- Python strings, containers, unpacking assignment, arbitrary objects, bounds checks and array-wide NumPy operations are unsupported.
 # Special thanks
 
 Inspired by [numpile](https://dev.stephendiehl.com/numpile/) tutorial and continue to work on this basis.

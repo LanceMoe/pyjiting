@@ -1,554 +1,353 @@
-import ast
-from collections import defaultdict
-from ctypes import c_int64, c_void_p
+import ast as py_ast
 import ctypes
 
 from llvmlite import ir
 
-from pyjiting.ll_types import mangler
-
-from .ast import (LLVM_PRIM_OPS, Assign, Break, CallFunc, Compare, Const, Expr, Fun, If, Index,
-                  LitFloat, LitInt, Loop, Noop, Prim, Return, Var, While)
-from .types import *
-
-'''
-Codegen is a module that takes an AST and generates LLVM IR.
-'''
-
-reg_known_func = {}
-
-ir_ptr_t = ir.PointerType
-ir_int32_t = ir.IntType(32)
-ir_int64_t = ir.IntType(64)
-ir_float_t = ir.FloatType()
-ir_double_t = ir.DoubleType()
-ir_bool_t = ir.IntType(64)
-ir_void_t = ir.VoidType()
-ir_void_ptr_t = ir_ptr_t(ir.IntType(8))
+from . import ast as core
+from .errors import CodegenError
+from .ll_types import mangler
+from .registry import get as get_registered, keep_callback
+from .types import (bool_t, double64_t, float32_t, int32_t, int64_t, is_array,
+                    is_float, is_integer, shape_t, void_t)
 
 
-def array_type(elt_type):
-    struct_type = ir.global_context.get_identified_type(
-        'ndarray_' + str(elt_type))
-
-    # The type can already exist.
-    if struct_type.elements:
-        return struct_type
-
-    # If not, initialize it.
-    struct_type.set_body(
-        ir_ptr_t(elt_type),        # data
-        ir_int32_t,           # dimensions
-        ir_ptr_t(ir_int32_t),  # shape
-    )
-    return struct_type
+ir_i1 = ir.IntType(1)
+ir_i32 = ir.IntType(32)
+ir_i64 = ir.IntType(64)
+ir_f32 = ir.FloatType()
+ir_f64 = ir.DoubleType()
+ir_void = ir.VoidType()
 
 
-ir_int32_array_t = ir_ptr_t(array_type(ir_int32_t))
-ir_int64_array_t = ir_ptr_t(array_type(ir_int64_t))
-ir_double_array_t = ir_ptr_t(array_type(ir_double_t))
+def array_type(element):
+    name = f'pyjiting.ndarray.{element}'
+    struct = ir.global_context.get_identified_type(name)
+    if not struct.elements:
+        struct.set_body(ir.PointerType(element), ir_i64, ir.PointerType(ir_i64), ir.PointerType(ir_i64))
+    return ir.PointerType(struct)
 
-lltypes_map = {
-    int32_t: ir_int32_t,
-    int64_t: ir_int64_t,
-    bool_t: ir_bool_t,
-    float32_t: ir_float_t,
-    double64_t: ir_double_t,
-    int32_array_t: ir_int32_array_t,
-    int64_array_t: ir_int64_array_t,
-    double64_array_t: ir_double_array_t,
-    void_t: ir_void_t,
+
+TYPE_MAP = {
+    int32_t: ir_i32, int64_t: ir_i64, bool_t: ir_i64, float32_t: ir_f32,
+    double64_t: ir_f64, void_t: ir_void,
 }
 
 
-def to_lltype(ptype):
-    return lltypes_map[ptype]
-
-
-def determined(ty):
-    return len(ftv(ty)) == 0
-
-
-def reg_func(func_name, func):
-    reg_known_func[func_name] = func
-
-
-def get_reg_func(func_name):
-    return reg_known_func.get(func_name, None)
-
-
-def arg_ctype(arg):
-    if arg == ir_int64_t:
-        return c_int64
-    raise RuntimeError('Unsupported type:', arg)
-
-
-def arg_classtype(arg):
-    if arg is int:
-        return int64_t
-    elif arg is float:
-        return double64_t
-    else:
-        raise RuntimeError('Unsupported type:', arg)
-
-
-class LLVMCodeGen(object):
-    def __init__(self, module, spec_types, return_type, args):
-        self.module = module             # LLVM Module
-        self.function = None             # LLVM Function
-        self.builder = None              # LLVM Builder
-        self.locals = {}                 # Local variables
-        self.arrays = defaultdict(dict)  # Array metadata
-        self.exit_block = None           # Exit block
-        self.spec_types = spec_types     # Type specialization
-        self.return_type = return_type   # Return type
-        self.args = args                 # Argument types
-        self.org_func_name = None        # Original function name
-        self.break_block_stack = []      # Break block stack
-
-    def start_function(self, name, module, ir_ret_type, argtypes):
-        func_type = ir.FunctionType(ir_ret_type, argtypes, False)
-        function = ir.Function(module, func_type, name)
-        entry_block = function.append_basic_block('entry')
-        builder = ir.IRBuilder(entry_block)
-        self.exit_block = function.append_basic_block('exit')
-        self.function = function
-        self.builder = builder
-
-    def end_function(self):
-        self.builder.position_at_end(self.exit_block)
-
-        if 'retval' in self.locals:
-            retval = self.builder.load(self.locals['retval'])
-            self.builder.ret(retval)
-        else:
-            self.builder.ret_void()
-
-    def add_block(self, name):
-        return self.function.append_basic_block(name)
-
-    def set_block(self, block):
-        self.block = block
-        self.builder.position_at_end(block)
-
-    def cbranch(self, cond, true_block, false_block):
-        self.builder.cbranch(cond, true_block, false_block)
-
-    def branch(self, next_block):
-        self.builder.branch(next_block)
-
-    def specialize(self, value):
-        if isinstance(value.type, VarType):
-            return to_lltype(self.spec_types[value.type.s])
-        if isinstance(value.type, BaseType):
-            return to_lltype(value.type)
-        return to_lltype(value.type)
-
-    def const(self, value):
-        if value is None:
-            return ir.Constant(ir_void_t, None)
-        elif isinstance(value, ir.Constant):
-            return value
-        elif isinstance(value, bool):
-            return ir.Constant(ir_bool_t, int(value))
-        elif isinstance(value, int):
-            return ir.Constant(ir_int64_t, value)
-        elif isinstance(value, float):
-            return ir.Constant(ir_double_t, value)
-        elif isinstance(value, str):
-            # Null-terminated constant string
-            return ir.Constant(ir.ArrayType(ir.IntType(8), len(value) + 1),
-                              bytearray(value.encode('utf-8') + b'\x00'))
-        else:
-            print(value, type(value))
-            raise NotImplementedError
-
-    def visit_Const(self, node: Const):
-        return self.const(node.value)
-
-    def visit_LitInt(self, node: LitInt):
-        ty = self.specialize(node)
-        if ty is ir_double_t:
-            return ir.Constant(ir_double_t, node.n)
-        elif ty == ir_int64_t:
-            return ir.Constant(ir_int64_t, node.n)
-        elif ty == ir_int32_t:
-            return ir.Constant(ir_int32_t, node.n)
-
-    def visit_LitFloat(self, node: LitFloat):
-        ty = self.specialize(node)
-        if ty is ir_double_t:
-            return ir.Constant(ir_double_t, node.n)
-        elif ty == ir_int64_t:
-            return ir.Constant(ir_int64_t, node.n)
-        elif ty == ir_int32_t:
-            return ir.Constant(ir_int32_t, node.n)
-
-    def visit_Noop(self, node: Noop):
-        pass
-
-    def visit_Fun(self, node: Fun):
-        ir_ret_type = to_lltype(self.return_type)
-        argtypes = list(map(to_lltype, self.args))
-        # Create a unique specialized name
-        func_name = mangler(node.fname, self.args)
-        self.org_func_name = node.fname
-        self.start_function(func_name, self.module, ir_ret_type, argtypes)
-
-        for (ar, llarg, argty) in list(zip(node.args, self.function.args, self.args)):
-            name = ar.id
-            llarg.name = name
-
-            if is_array(argty):
-                zero = self.const(0)
-                one = self.const(1)
-                two = self.const(2)
-
-                data = self.builder.gep(llarg, [
-                                        zero, zero], name=(name + '_data'))
-                dims = self.builder.gep(llarg, [
-                                        zero, one], name=(name + '_dims'))
-                shape = self.builder.gep(llarg, [
-                                         zero, two], name=(name + '_strides'))
-
-                self.arrays[name]['data'] = self.builder.load(data)
-                self.arrays[name]['dims'] = self.builder.load(dims)
-                self.arrays[name]['shape'] = self.builder.load(shape)
-                self.locals[name] = llarg
-            else:
-                argref = self.builder.alloca(to_lltype(argty))
-                self.builder.store(llarg, argref)
-                self.locals[name] = argref
-
-        # Setup the register for return type.
-        if ir_ret_type is not ir_void_t:
-            self.locals['retval'] = self.builder.alloca(
-                ir_ret_type, name='retval')
-
-        list(map(self.visit, node.body))
-        self.end_function()
-
-    def visit_Index(self, node: Index):
-        if isinstance(node.value, Var) and node.value.id in self.arrays:
-            value = self.visit(node.value)
-            ix = self.visit(node.ix)
-            dataptr = self.arrays[node.value.id]['data']
-            ret = self.builder.gep(dataptr, [ix])
-            return self.builder.load(ret)
-        else:
-            value = self.visit(node.value)
-            ix = self.visit(node.ix)
-            ret = self.builder.gep(value, [ix])
-            return self.builder.load(ret)
-
-    def visit_Var(self, node: Var):
-        return self.builder.load(self.locals[node.id])
-
-    def visit_Return(self, node: Return):
-        value = self.visit(node.value)
-        if value.type != ir_void_t:
-            self.builder.store(value, self.locals['retval'])
-        self.builder.branch(self.exit_block)
-
-    def visit_Loop(self, node: Loop):
-        if not hasattr(self, '_for_counter'):
-            self._for_counter = 0
-        self._for_counter += 1
-        init_block = self.add_block(f'for_init_{self._for_counter}')
-        test_block = self.add_block(f'for_cond_{self._for_counter}')
-        body_block = self.add_block(f'for_body_{self._for_counter}')
-        end_block = self.add_block(f'for_after_{self._for_counter}')
-        self.break_block_stack.append(end_block)
-
-        self.branch(init_block)
-        self.set_block(init_block)
-
-        start = self.visit(node.begin)
-        stop = self.visit(node.end)
-        step = self.visit(node.step)
-
-        # Setup the increment variable
-        varname = node.var.id
-        inc = self.builder.alloca(ir_int64_t, name=varname)
-        self.builder.store(start, inc)
-        self.locals[varname] = inc
-
-        # Setup the loop condition
-        self.branch(test_block)
-        self.set_block(test_block)
-        cond = self.builder.icmp_signed('<', self.builder.load(inc), stop)
-        self.builder.cbranch(cond, body_block, end_block)
-
-        # Generate the loop body
-        self.set_block(body_block)
-        list(map(self.visit, node.body))
-
-        if self.block.terminator is None:
-            # Increment the counter
-            succ = self.builder.add(self.const(step), self.builder.load(inc))
-            self.builder.store(succ, inc)
-
-            # Exit the loop
-            self.builder.branch(test_block)
-        self.set_block(end_block)
-
-        # Pop the break block
-        self.break_block_stack.pop()
-
-    def visit_Break(self, node: Break):
-        if self.block.terminator is None:
-            self.branch(self.break_block_stack[-1])
-
-    def visit_Prim(self, node: Prim):
-        if node.fn == 'shape#':
-            ref = node.args[0]
-            shape = self.arrays[ref.id]['shape']
-            return shape
-        elif node.fn not in LLVM_PRIM_OPS:
-            raise NotImplementedError(ast.dump(node))
-        if node.fn == 'mult#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fmul(a, b)
-            else:
-                return self.builder.mul(a, b)
-        elif node.fn == 'add#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fadd(a, b)
-            else:
-                return self.builder.add(a, b)
-        elif node.fn == 'sub#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fsub(a, b)
-            else:
-                return self.builder.sub(a, b)
-        elif node.fn == 'div#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fdiv(a, b)
-            else:
-                return self.builder.sdiv(a, b)
-        elif node.fn == 'mod#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.frem(a, b)
-            else:
-                return self.builder.srem(a, b)
-        elif node.fn == 'lt#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fcmp_unordered('<', a, b)
-            else:
-                return self.builder.icmp_signed('<', a, b)
-        elif node.fn == 'gt#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fcmp_unordered('>', a, b)
-            else:
-                return self.builder.icmp_signed('>', a, b)
-        elif node.fn == 'le#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fcmp_unordered('<=', a, b)
-            else:
-                return self.builder.icmp_signed('<=', a, b)
-        elif node.fn == 'ge#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fcmp_unordered('>=', a, b)
-            else:
-                return self.builder.icmp_signed('>=', a, b)
-        elif node.fn == 'eq#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fcmp_unordered('==', a, b)
-            else:
-                return self.builder.icmp_signed('==', a, b)
-        elif node.fn == 'ne#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            if a.type == ir_double_t:
-                return self.builder.fcmp_unordered('!=', a, b)
-            else:
-                return self.builder.icmp_signed('!=', a, b)
-        elif node.fn == 'and#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            return self.builder.and_(a, b)
-        elif node.fn == 'or#':
-            a = self.visit(node.args[0])
-            b = self.visit(node.args[1])
-            return self.builder.or_(a, b)
-        elif node.fn == 'not#':
-            a = self.visit(node.args[0])
-            return self.builder.not_(a)
-        elif node.fn == 'neg#':
-            a = self.visit(node.args[0])
-            if a.type == ir_double_t:
-                return self.builder.fsub(self.const(0), a)
-            else:
-                return self.builder.sub(self.const(0), a)
-        elif node.fn == 'pow#':
-            # a = self.visit(node.args[0])
-            # b = self.visit(node.args[1])
-            # return self.builder.call(pow_func, [a, b])
-            raise NotImplementedError('pow#', ast.dump(node))
-
-    def visit_Assign(self, node: Assign):
-        # Subsequent assignment
-        if node.ref in self.locals:
-            name = node.ref
-            ptr = self.locals[name]
-            value = self.visit(node.value)
-            self.builder.store(value, ptr)
-            self.locals[name] = ptr
-            return ptr
-
-        # First assignment
-        else:
-            name = node.ref
-            value = self.visit(node.value)
-            ty = self.specialize(node)
-            ptr = self.builder.alloca(ty, name=name)
-            self.builder.store(value, ptr)
-            self.locals[name] = ptr
-            return ptr
-
-    def visit_NoneType(self, node: None):
-        return None
-
-    def visit_If(self, node: If):
-        if not hasattr(self, '_if_counter'):
-            self._if_counter = 0
-        self._if_counter += 1
-        test_block = self.add_block(f'if_cond_{self._if_counter}')
-        then_block = self.add_block(f'if_then_{self._if_counter}')
-        if has_else := len(node.orelse) > 0:
-            else_block = self.add_block(f'if_orelse_{self._if_counter}')
-        end_block = self.add_block(f'if_after_{self._if_counter}')
-
-        self.branch(test_block)
-        self.set_block(test_block)
-        test = self.visit(node.test)
-        self.builder.cbranch(
-            test, then_block, else_block if has_else else end_block)
-
-        self.set_block(then_block)
-        list(map(self.visit, node.body))
-        if self.block.terminator is None:
-            self.branch(end_block)
-
-        if has_else:
-            self.set_block(else_block)
-            list(map(self.visit, node.orelse))
-            if self.block.terminator is None:
-                self.branch(end_block)
-
-        self.set_block(end_block)
-
-    def visit_While(self, node: While):
-        if not hasattr(self, '_while_counter'):
-            self._while_counter = 0
-        self._while_counter += 1
-        test_block = self.add_block(f'while_cond_{self._while_counter}')
-        then_block = self.add_block(f'while_then_{self._while_counter}')
-        if has_else := len(node.orelse) > 0:
-            else_block = self.add_block(f'while_orelse_{self._while_counter}')
-        end_block = self.add_block(f'while_after_{self._while_counter}')
-
-        self.branch(test_block)
-        self.set_block(test_block)
-        test = self.visit(node.test)
-        self.builder.cbranch(
-            test, then_block, else_block if has_else else end_block)
-
-        self.set_block(then_block)
-        list(map(self.visit, node.body))
-        if self.block.terminator is None:
-            self.branch(test_block)
-
-        if has_else:
-            self.set_block(else_block)
-            list(map(self.visit, node.orelse))
-            if self.block.terminator is None:
-                self.branch(test_block)
-
-        self.set_block(end_block)
-
-    def visit_Compare(self, node: Compare):
-        # Setup the increment variable
-        lf = self.visit(node.left)
-        rt = self.visit(node.comparators[0])
-        op = {
-            'eq#': '==',
-            'ne#': '!=',
-            'lt#': '<',
-            'gt#': '>',
-            'le#': '<=',
-            'ge#': '>=',
-        }.get(node.ops[0], None)
-        if op is None:
-            raise NotImplementedError(node.ops[0])
-        cond = self.builder.icmp_signed(op, lf, rt)
-        return cond
-
-    def visit_CallFunc(self, node: CallFunc):
-        func_name = node.fn.id
-        args = [self.visit(arg) for arg in node.args]
-        func = None
-        if func_name == self.org_func_name:
-            # Implement recursion
-            func = self.function
-            return self.builder.call(func, args)
-
-        # Call registered functions
-        fn = get_reg_func(func_name)
-        if fn is None:
-            raise NotImplementedError(
-                f'CallFunc: {func_name} function is not registered!')
-
-        fname = fn.__name__
-        types = fn.__annotations__
-        arg_names = fn.__code__.co_varnames
-        ir_return_type = to_lltype(arg_classtype(types['return']))
-        ir_args = [to_lltype(arg_classtype(types[arg_name]))
-                   for arg_name in arg_names]
-        wrap_caller_func_t = ir.FunctionType(ir_return_type, ir_args)
-        wrap_caller_func_t_ptr = wrap_caller_func_t.as_pointer()
-
-        # Get source function addr
-        c_args = list(map(arg_ctype, ir_args))
-        FUNC_T = ctypes.CFUNCTYPE(arg_ctype(ir_return_type), *c_args)
-        pyfunc_ptr = ctypes.cast(FUNC_T(fn), c_void_p).value
-
-        # Make llvm ir wrapper function
-        func_ptr = self.builder.inttoptr(
-            ir.Constant(ir_int64_t, pyfunc_ptr),
-            wrap_caller_func_t_ptr, name=f'{mangler(fname, args)}_ptr'
-        )
-        return self.builder.call(func_ptr, args)
-
-    def visit_Expr(self, node: Expr):
-        return self.visit(node.value)
+def to_lltype(ty):
+    if is_array(ty): return array_type(to_lltype(ty.b))
+    try: return TYPE_MAP[ty]
+    except KeyError as error: raise CodegenError(f'no LLVM type for {ty}') from error
+
+
+def determined(ty): return ty is not None
+
+
+class LLVMCodeGen:
+    def __init__(self, module, return_type, args):
+        self.module, self.return_type, self.args = module, return_type, args
+        self.function = self.builder = None
+        self.locals, self.arrays, self.shapes = {}, {}, {}
+        self.break_blocks, self.continue_blocks = [], []
+        self.exit_block = self.return_slot = None
+        self.org_func_name = None
+        self.counter = 0
+
+    def new_block(self, prefix):
+        self.counter += 1
+        return self.function.append_basic_block(f'{prefix}_{self.counter}')
+
+    def set_block(self, block): self.builder.position_at_end(block)
+    def terminated(self): return self.builder.block.terminator is not None
+
+    def alloca(self, ty, name):
+        raise CodegenError(f'local {name} was not allocated during function setup')
+
+    def start_function(self, name):
+        self.function = ir.Function(self.module, ir.FunctionType(to_lltype(self.return_type), [to_lltype(ty) for ty in self.args]), name)
+        entry = self.function.append_basic_block('entry')
+        self.exit_block = self.function.append_basic_block('exit')
+        self.builder = ir.IRBuilder(entry)
+
+    def finish_function(self):
+        if not self.terminated(): self.builder.branch(self.exit_block)
+        self.set_block(self.exit_block)
+        if self.return_type == void_t: self.builder.ret_void()
+        else: self.builder.ret(self.builder.load(self.return_slot))
 
     def visit(self, node):
-        name = f'visit_{type(node).__name__}'
-        if hasattr(self, name):
-            return getattr(self, name)(node)
-        else:
-            return self.generic_visit(node)
+        if isinstance(node, list):
+            result = None
+            for item in node:
+                if self.terminated(): break
+                result = self.visit(item)
+            return result
+        method = getattr(self, f'visit_{type(node).__name__}', None)
+        if method is None: raise CodegenError(f'no code generator for {type(node).__name__}', node)
+        return method(node)
 
-    def generic_visit(self, node):
-        raise NotImplementedError(ast.dump(node))
+    def const(self, value, ty=None):
+        ty = ty or (ir_i64 if isinstance(value, int) else ir_f64)
+        return ir.Constant(ty, value)
+
+    def cast(self, value, source, target):
+        if source == target: return value
+        target_ll = to_lltype(target)
+        if source == bool_t:
+            source = int64_t
+            if source == target: return value
+        if target == bool_t: return self.truthy(value, source, normalize=True)
+        if is_integer(source) and is_integer(target):
+            return self.builder.sext(value, target_ll) if value.type.width < target_ll.width else self.builder.trunc(value, target_ll)
+        if is_integer(source) and is_float(target): return self.builder.sitofp(value, target_ll)
+        if is_float(source) and is_float(target):
+            return self.builder.fpext(value, target_ll) if source == float32_t else self.builder.fptrunc(value, target_ll)
+        raise CodegenError(f'cannot cast {source} to {target}')
+
+    def truthy(self, value, ty, normalize=False):
+        if ty == bool_t or is_integer(ty): result = self.builder.icmp_signed('!=', value, ir.Constant(value.type, 0))
+        elif is_float(ty): result = self.builder.fcmp_ordered('!=', value, ir.Constant(value.type, 0.0))
+        else: raise CodegenError(f'cannot use {ty} as a condition')
+        return self.builder.zext(result, ir_i64) if normalize else result
+
+    def visit_Fun(self, node):
+        self.org_func_name = node.fname
+        self.start_function(mangler(node.fname, self.args))
+        local_types = {}
+        for item in py_ast.walk(node):
+            if isinstance(item, core.Assign): local_types[item.ref] = item.type
+            elif isinstance(item, core.Loop): local_types[item.var.id] = int64_t
+        if self.return_type != void_t:
+            self.return_slot = self.builder.alloca(to_lltype(self.return_type), name='retval')
+        for name, ty in local_types.items():
+            self.locals[name] = self.builder.alloca(to_lltype(ty), name=name)
+        for core_arg, ll_arg, ty in zip(node.args, self.function.args, self.args):
+            ll_arg.name = core_arg.id
+            if is_array(ty):
+                self.locals[core_arg.id] = ll_arg
+                zero = ir.Constant(ir_i32, 0)
+                data = self.builder.gep(ll_arg, [zero, zero]); ndim = self.builder.gep(ll_arg, [zero, ir.Constant(ir_i32, 1)])
+                shape = self.builder.gep(ll_arg, [zero, ir.Constant(ir_i32, 2)]); strides = self.builder.gep(ll_arg, [zero, ir.Constant(ir_i32, 3)])
+                self.arrays[core_arg.id] = {'data': self.builder.load(data), 'ndim': self.builder.load(ndim), 'shape': self.builder.load(shape), 'strides': self.builder.load(strides), 'element': ty.b}
+            else:
+                ptr = self.builder.alloca(to_lltype(ty), name=core_arg.id); self.builder.store(ll_arg, ptr); self.locals[core_arg.id] = ptr
+        if self.return_type != void_t:
+            self.builder.store(ir.Constant(to_lltype(self.return_type), None), self.return_slot)
+        self.visit(node.body)
+        self.finish_function()
+        return self.function
+
+    def visit_LitInt(self, node): return ir.Constant(to_lltype(node.type), node.n)
+    def visit_LitFloat(self, node): return ir.Constant(to_lltype(node.type), node.n)
+    def visit_LitBool(self, node): return ir.Constant(ir_i64, int(node.n))
+    def visit_Var(self, node):
+        if node.id in self.arrays: return self.locals[node.id]
+        return self.builder.load(self.locals[node.id])
+
+    def _index_address(self, value, indices):
+        if not isinstance(value, core.Var) or value.id not in self.arrays: raise CodegenError('only parameter arrays can be indexed', value)
+        metadata = self.arrays[value.id]
+        offset = ir.Constant(ir_i64, 0)
+        for dim, index in enumerate(indices):
+            stride_ptr = self.builder.gep(metadata['strides'], [ir.Constant(ir_i64, dim)])
+            stride = self.builder.load(stride_ptr)
+            offset = self.builder.add(offset, self.builder.mul(self.cast(self.visit(index), index.type, int64_t), stride))
+        return self.builder.gep(metadata['data'], [offset]), metadata['element']
+
+    def visit_Index(self, node):
+        if node.value.type == shape_t:
+            if not isinstance(node.value, core.Prim) or not isinstance(node.value.args[0], core.Var): raise CodegenError('shape value is not indexable', node)
+            shape = self.arrays[node.value.args[0].id]['shape']
+            index = self.cast(self.visit(node.indices[0]), node.indices[0].type, int64_t)
+            return self.builder.load(self.builder.gep(shape, [index]))
+        address, _ = self._index_address(node.value, node.indices)
+        return self.builder.load(address)
+
+    def visit_Assign(self, node):
+        value = self.visit(node.value); value = self.cast(value, node.value.type, node.type)
+        ptr = self.locals.get(node.ref)
+        if ptr is None: raise CodegenError(f'unknown local {node.ref}', node)
+        self.builder.store(value, ptr)
+
+    def visit_StoreIndex(self, node):
+        address, element = self._index_address(node.value, node.indices)
+        value = self.cast(self.visit(node.rhs), node.rhs.type, element)
+        self.builder.store(value, address)
+
+    def _compare(self, op, left, right, ty):
+        if is_float(ty):
+            predicates = {'eq#': '==', 'ne#': '!=', 'lt#': '<', 'le#': '<=', 'gt#': '>', 'ge#': '>='}
+            if op == 'ne#': return self.builder.fcmp_unordered(predicates[op], left, right)
+            return self.builder.fcmp_ordered(predicates[op], left, right)
+        predicates = {'eq#': '==', 'ne#': '!=', 'lt#': '<', 'le#': '<=', 'gt#': '>', 'ge#': '>='}
+        return self.builder.icmp_signed(predicates[op], left, right)
+
+    def visit_Compare(self, node):
+        left, left_ty = self.visit(node.left), node.left.type
+        if len(node.ops) == 1:
+            comparator = node.comparators[0]
+            right = self.visit(comparator); common = self._common(left_ty, comparator.type)
+            return self.builder.zext(self._compare(node.ops[0], self.cast(left, left_ty, common), self.cast(right, comparator.type, common), common), ir_i64)
+
+        end = self.new_block('compare_end')
+        false_blocks = []
+        for position, (op, comparator) in enumerate(zip(node.ops, node.comparators)):
+            right = self.visit(comparator)
+            common = self._common(left_ty, comparator.type)
+            passed = self._compare(op, self.cast(left, left_ty, common), self.cast(right, comparator.type, common), common)
+            current = self.builder.block
+            if position == len(node.ops) - 1:
+                failed = self.new_block('compare_false')
+                self.builder.cbranch(passed, end, failed)
+                true_block = current
+                self.set_block(failed); self.builder.branch(end); false_blocks.append(failed)
+                break
+            next_block = self.new_block('compare_next')
+            failed = self.new_block('compare_false')
+            self.builder.cbranch(passed, next_block, failed)
+            self.set_block(failed); self.builder.branch(end); false_blocks.append(failed)
+            self.set_block(next_block)
+            left, left_ty = right, comparator.type
+        self.set_block(end)
+        result = self.builder.phi(ir_i64)
+        result.add_incoming(ir.Constant(ir_i64, 1), true_block)
+        for block in false_blocks: result.add_incoming(ir.Constant(ir_i64, 0), block)
+        return result
+
+    def _common(self, left, right):
+        from .types import promote_numeric
+        result = promote_numeric(left, right)
+        if result is None: raise CodegenError(f'no common type for {left}, {right}')
+        return result
+
+    def visit_Prim(self, node):
+        if node.fn == 'shape#': return None
+        if node.fn in ('and#', 'or#'): return self._short_circuit(node)
+        if node.fn == 'not#':
+            truth = self.truthy(self.visit(node.args[0]), node.args[0].type)
+            return self.builder.zext(self.builder.not_(truth), ir_i64)
+        if node.fn == 'neg#':
+            value = self.visit(node.args[0]); return self.builder.fneg(value) if is_float(node.type) else self.builder.neg(value)
+        left = self.cast(self.visit(node.args[0]), node.args[0].type, node.operand_type)
+        right = self.cast(self.visit(node.args[1]), node.args[1].type, node.operand_type)
+        if node.fn == 'add#': return self.builder.fadd(left, right) if is_float(node.type) else self.builder.add(left, right)
+        if node.fn == 'sub#': return self.builder.fsub(left, right) if is_float(node.type) else self.builder.sub(left, right)
+        if node.fn == 'mult#': return self.builder.fmul(left, right) if is_float(node.type) else self.builder.mul(left, right)
+        if node.fn == 'div#':
+            return self.builder.fdiv(self.cast(left, node.operand_type, node.type), self.cast(right, node.operand_type, node.type))
+        if node.fn == 'floordiv#':
+            if is_float(node.type):
+                division = self.builder.fdiv(left, right); floor = self._llvm_floor(node.type); return self.builder.call(floor, [division])
+            return self._integer_floor_div(left, right)
+        if node.fn == 'mod#': return self._float_mod(left, right) if is_float(node.type) else self._integer_mod(left, right)
+        if node.fn == 'pow#': return self._pow(node, left, right)
+        raise CodegenError(f'unknown primitive {node.fn}', node)
+
+    def _llvm_floor(self, ty):
+        name = 'llvm.floor.f32' if ty == float32_t else 'llvm.floor.f64'
+        return self.module.globals.get(name) or ir.Function(self.module, ir.FunctionType(to_lltype(ty), [to_lltype(ty)]), name)
+
+    def _integer_floor_div(self, left, right):
+        quotient = self.builder.sdiv(left, right)
+        remainder = self.builder.srem(left, right)
+        has_remainder = self.builder.icmp_signed('!=', remainder, ir.Constant(left.type, 0))
+        different_sign = self.builder.icmp_signed('<', self.builder.xor(left, right), ir.Constant(left.type, 0))
+        correction = self.builder.and_(has_remainder, different_sign)
+        return self.builder.sub(quotient, self.builder.zext(correction, left.type))
+
+    def _integer_mod(self, left, right):
+        remainder = self.builder.srem(left, right)
+        has_remainder = self.builder.icmp_signed('!=', remainder, ir.Constant(left.type, 0))
+        different_sign = self.builder.icmp_signed('<', self.builder.xor(left, right), ir.Constant(left.type, 0))
+        correction = self.builder.and_(has_remainder, different_sign)
+        return self.builder.add(remainder, self.builder.select(correction, right, ir.Constant(right.type, 0)))
+
+    def _float_mod(self, left, right):
+        remainder = self.builder.frem(left, right)
+        has_remainder = self.builder.fcmp_ordered('!=', remainder, ir.Constant(left.type, 0.0))
+        different_sign = self.builder.fcmp_ordered('<', self.builder.fmul(remainder, right), ir.Constant(left.type, 0.0))
+        correction = self.builder.and_(has_remainder, different_sign)
+        return self.builder.fadd(remainder, self.builder.select(correction, right, ir.Constant(right.type, 0.0)))
+
+    def _pow(self, node, left, right):
+        if is_float(node.type):
+            ty = to_lltype(node.type); name = 'llvm.pow.f32' if node.type == float32_t else 'llvm.pow.f64'
+            fn = self.module.globals.get(name) or ir.Function(self.module, ir.FunctionType(ty, [ty, ty]), name)
+            return self.builder.call(fn, [self.cast(left, node.operand_type, node.type), self.cast(right, node.operand_type, node.type)])
+        exponent = node.args[1].n
+        result = ir.Constant(to_lltype(node.type), 1); base = left
+        while exponent:
+            if exponent & 1: result = self.builder.mul(result, base)
+            exponent >>= 1
+            if exponent: base = self.builder.mul(base, base)
+        return result
+
+    def _short_circuit(self, node):
+        left = self.cast(self.visit(node.args[0]), node.args[0].type, node.type)
+        lhs_block = self.builder.block; rhs_block = self.new_block('bool_rhs'); end_block = self.new_block('bool_end')
+        condition = self.truthy(left, node.type)
+        if node.fn == 'and#': self.builder.cbranch(condition, rhs_block, end_block)
+        else: self.builder.cbranch(condition, end_block, rhs_block)
+        self.set_block(rhs_block); right = self.cast(self.visit(node.args[1]), node.args[1].type, node.type); self.builder.branch(end_block); rhs_block = self.builder.block
+        self.set_block(end_block); phi = self.builder.phi(to_lltype(node.type)); phi.add_incoming(left, lhs_block); phi.add_incoming(right, rhs_block); return phi
+
+    def visit_If(self, node):
+        test_block, then_block, else_block, end_block = self.new_block('if_test'), self.new_block('if_then'), self.new_block('if_else'), self.new_block('if_end')
+        self.builder.branch(test_block); self.set_block(test_block); self.builder.cbranch(self.truthy(self.visit(node.test), node.test.type), then_block, else_block)
+        self.set_block(then_block); self.visit(node.body);
+        if not self.terminated(): self.builder.branch(end_block)
+        self.set_block(else_block); self.visit(node.orelse)
+        if not self.terminated(): self.builder.branch(end_block)
+        self.set_block(end_block)
+
+    def visit_While(self, node):
+        test, body, after = self.new_block('while_test'), self.new_block('while_body'), self.new_block('while_after')
+        otherwise = self.new_block('while_else') if node.orelse else after
+        self.builder.branch(test); self.break_blocks.append(after); self.continue_blocks.append(test)
+        self.set_block(test); self.builder.cbranch(self.truthy(self.visit(node.test), node.test.type), body, otherwise if node.orelse else after)
+        self.set_block(body); self.visit(node.body)
+        if not self.terminated(): self.builder.branch(test)
+        self.continue_blocks.pop(); self.break_blocks.pop()
+        if node.orelse:
+            self.set_block(otherwise); self.visit(node.orelse)
+            if not self.terminated(): self.builder.branch(after)
+        self.set_block(after)
+
+    def visit_Loop(self, node):
+        init, test, body, latch, after = (self.new_block('for_init'), self.new_block('for_test'), self.new_block('for_body'), self.new_block('for_latch'), self.new_block('for_after'))
+        otherwise = self.new_block('for_else') if node.orelse else after
+        self.builder.branch(init); self.set_block(init)
+        ptr = self.locals[node.var.id]; self.builder.store(self.cast(self.visit(node.begin), node.begin.type, int64_t), ptr); self.builder.branch(test)
+        self.set_block(test); step = self.cast(self.visit(node.step), node.step.type, int64_t); current = self.builder.load(ptr); stop = self.cast(self.visit(node.end), node.end.type, int64_t)
+        positive = self.builder.icmp_signed('>', step, ir.Constant(ir_i64, 0)); negative = self.builder.icmp_signed('<', step, ir.Constant(ir_i64, 0)); less = self.builder.icmp_signed('<', current, stop); greater = self.builder.icmp_signed('>', current, stop)
+        condition = self.builder.select(positive, less, self.builder.select(negative, greater, ir.Constant(ir_i1, 0))); self.builder.cbranch(condition, body, otherwise if node.orelse else after)
+        self.break_blocks.append(after); self.continue_blocks.append(latch)
+        self.set_block(body); self.visit(node.body)
+        if not self.terminated(): self.builder.branch(latch)
+        self.set_block(latch); self.builder.store(self.builder.add(self.builder.load(ptr), step), ptr); self.builder.branch(test)
+        self.continue_blocks.pop(); self.break_blocks.pop()
+        if node.orelse:
+            self.set_block(otherwise); self.visit(node.orelse)
+            if not self.terminated(): self.builder.branch(after)
+        self.set_block(after)
+
+    def visit_Break(self, node): self.builder.branch(self.break_blocks[-1])
+    def visit_Continue(self, node): self.builder.branch(self.continue_blocks[-1])
+
+    def visit_Return(self, node):
+        if self.return_type != void_t: self.builder.store(self.cast(self.visit(node.value), node.value.type, self.return_type), self.return_slot)
+        self.builder.branch(self.exit_block)
+
+    def visit_CallFunc(self, node):
+        args = [self.visit(arg) for arg in node.args]
+        if node.fn.id == self.org_func_name: return self.builder.call(self.function, args)
+        registered = get_registered(node.fn.id)
+        if registered is None: raise CodegenError(f'function {node.fn.id!r} is not registered', node)
+        fn, signature = registered; ll_args = [to_lltype(ty) for ty in signature.args]; ll_return = to_lltype(signature.return_type)
+        c_args = [ctypes.c_int64 if ty in (int64_t, bool_t) else ctypes.c_int32 if ty == int32_t else ctypes.c_float if ty == float32_t else ctypes.c_double for ty in signature.args]
+        c_return = ctypes.c_int64 if signature.return_type in (int64_t, bool_t) else ctypes.c_int32 if signature.return_type == int32_t else ctypes.c_float if signature.return_type == float32_t else ctypes.c_double
+        callback = ctypes.CFUNCTYPE(c_return, *c_args)(fn); address = keep_callback(node.fn.id, callback)
+        pointer_ty = ir.PointerType(ir.FunctionType(ll_return, ll_args)); pointer = self.builder.inttoptr(ir.Constant(ir_i64, address), pointer_ty)
+        return self.builder.call(pointer, args)
+
+    def visit_Expr(self, node): return self.visit(node.value)
+    def visit_Noop(self, node): return None

@@ -74,6 +74,7 @@ float32_t = BaseType('Float')
 double64_t = BaseType('Double')
 void_t = BaseType('Void')
 array_t = BaseType('Array')
+shape_t = BaseType('Shape')
 
 ptr_t = PointerType
 
@@ -84,6 +85,7 @@ def make_array_type(t): return GenericType(array_t, t)
 int32_array_t = make_array_type(int32_t)
 int64_array_t = make_array_type(int64_t)
 double64_array_t = make_array_type(double64_t)
+float32_array_t = make_array_type(float32_t)
 
 
 def ftv(x) -> set:
@@ -100,3 +102,49 @@ def ftv(x) -> set:
 
 def is_array(ty: Union[GenericType, Any]) -> bool:
     return isinstance(ty, GenericType) and ty.a == array_t
+
+
+numeric_types = {bool_t, int32_t, int64_t, float32_t, double64_t}
+integer_types = {bool_t, int32_t, int64_t}
+float_types = {float32_t, double64_t}
+
+
+def is_numeric(ty):
+    return ty in numeric_types
+
+
+def is_integer(ty):
+    return ty in integer_types
+
+
+def is_float(ty):
+    return ty in float_types
+
+
+def promote_numeric(left, right):
+    """Return the language-level common numeric type for two scalar types."""
+    if not is_numeric(left) or not is_numeric(right):
+        return None
+    if left == double64_t or right == double64_t:
+        return double64_t
+    if left == float32_t or right == float32_t:
+        return double64_t if left == int64_t or right == int64_t else float32_t
+    if left == int64_t or right == int64_t:
+        return int64_t
+    if left == int32_t or right == int32_t:
+        return int32_t
+    return int64_t
+
+
+def can_widen(actual, expected):
+    if actual == expected:
+        return True
+    if actual == bool_t and expected in (int32_t, int64_t, float32_t, double64_t):
+        return True
+    if actual == int32_t and expected in (int64_t, float32_t, double64_t):
+        return True
+    if actual == int64_t and expected == double64_t:
+        return True
+    if actual == float32_t and expected == double64_t:
+        return True
+    return False
