@@ -59,6 +59,7 @@ Pyjiting compiles a function to native code when it is first called. A function 
 pyjiting uses fixed-width Int32/Int64 values, not arbitrary-precision Python integers. Mixed scalar operations use deterministic promotion: int32 widens to int64 as needed, float32 widens to float64 when combined with int64 or float64, and `/` produces a floating result. Assignment allows widening only, so a Python `int` must be explicitly converted to `np.int32` before storing into an int32 array.
 
 Arrays use a stable `data/ndim/shape/strides` ABI. Element reads and writes support multidimensional, transposed, sliced and negative-stride NumPy views. Bounds checks, array creation, broadcasting and whole-array ufunc operations are deliberately not supported.
+The number of indices must match the runtime array dimensionality; a mismatch raises `ValueError`.
 ## Requirements
 - Python >= 3.12
 - llvmlite >= 0.44 (new LLVM pass manager API)
@@ -157,7 +158,7 @@ uv run examples/example_mixed_types.py
 
 ## Performance
 
-You can find the source code of these test samples in the root directory.
+You can find the source code of these test samples in the `examples/` directory.
 
 ```
 My test environment:
@@ -224,7 +225,8 @@ This is a research/educational project, not a production JIT. Among others:
 
 - No garbage collection integration; only a small statically-typed subset of Python is supported.
 - `for` loops must iterate over `range`; a constant zero step is rejected during compilation.
-- Runtime division by zero and a dynamic zero range step are not yet translated to Python exceptions; they remain excluded until the planned error-status ABI is added.
+- Runtime division by zero raises `ZeroDivisionError`; a dynamic zero range step raises `ValueError` through the JIT error-status ABI.
+- A non-void JIT function must return on every control-flow path.
 - Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.
 - Registered (`@reg`) functions need supported scalar annotations and must not raise across the callback boundary.
 - Python strings, containers, unpacking assignment, arbitrary objects, bounds checks and array-wide NumPy operations are unsupported.

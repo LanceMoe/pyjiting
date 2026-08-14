@@ -46,7 +46,20 @@ class TypeInferencer:
         for stmt in node.body: self._visit_statement(stmt)
         if self.return_type is None: self.return_type = void_t
         if node.return_annotation: self.return_type = self._coerce(self.return_type, node.return_annotation, node)
+        if self.return_type != void_t and not self._always_returns(node.body):
+            raise InferError('non-Void function has a path without return', node)
         return FuncType(args=self.arg_types, return_type=self.return_type)
+
+    def _always_returns(self, statements):
+        for statement in statements:
+            if isinstance(statement, list):
+                if self._always_returns(statement): return True
+            elif isinstance(statement, core.Return):
+                return True
+            elif isinstance(statement, core.If):
+                if statement.orelse and self._always_returns(statement.body) and self._always_returns(statement.orelse):
+                    return True
+        return False
 
     def _visit_statement(self, stmt):
         if isinstance(stmt, list):
@@ -71,6 +84,20 @@ class TypeInferencer:
         if not is_array(array_ty): raise InferError('subscript assignment requires an array', node.value)
         for index in node.indices: self._coerce(self.visit(index), int64_t, index)
         node.type = self._coerce(self.visit(node.rhs), array_ty.b, node.rhs)
+
+    def visit_AugStoreIndex(self, node):
+        array_ty = self.visit(node.value)
+        if not is_array(array_ty): raise InferError('subscript assignment requires an array', node.value)
+        for index in node.indices: self._coerce(self.visit(index), int64_t, index)
+        rhs_ty = self.visit(node.rhs)
+        common = promote_numeric(array_ty.b, rhs_ty)
+        if common is None: raise InferError(f'{node.fn} requires numeric operands', node)
+        if node.fn == 'pow#' and is_integer(array_ty.b) and is_integer(rhs_ty) and not isinstance(node.rhs, core.LitInt):
+            raise InferError('integer power requires a constant exponent', node)
+        result = double64_t if node.fn == 'div#' and is_integer(common) else common
+        if node.fn == 'pow#' and isinstance(node.rhs, core.LitInt) and node.rhs.n < 0: result = double64_t
+        node.operand_type = common
+        node.type = self._coerce(result, array_ty.b, node)
 
     def visit_Index(self, node):
         value_ty = self.visit(node.value)

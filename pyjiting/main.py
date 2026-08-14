@@ -1,3 +1,5 @@
+# pyright: reportArgumentType=false
+
 import sys
 
 import llvmlite.binding as llvm

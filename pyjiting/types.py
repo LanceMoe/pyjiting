@@ -98,6 +98,7 @@ def ftv(x) -> set:
         return reduce(set.union, set(map(ftv, x.args))) | ftv(x.return_type)
     elif isinstance(x, VarType):
         return set([x])
+    raise TypeError(f'unsupported core type: {type(x).__name__}')
 
 
 def is_array(ty: Union[GenericType, Any]) -> bool:

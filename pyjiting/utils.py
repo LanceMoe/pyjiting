@@ -1,6 +1,6 @@
 from collections import deque
 
-from .infer import InferError, InfiniteType
+from .errors import InferError, InfiniteType
 from .types import BaseType, CoreType, FuncType, GenericType, VarType, ftv
 
 '''

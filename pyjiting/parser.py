@@ -9,8 +9,24 @@ from .types import bool_t, double64_t, float32_t, int32_t, int64_t
 
 
 def get_type_hint(annotation):
+    """Map supported syntax or evaluated annotations to a Core scalar type."""
     if annotation is None:
         return None
+    if isinstance(annotation, str):
+        try:
+            annotation = ast.parse(annotation, mode='eval').body
+        except SyntaxError:
+            return None
+    if annotation is int:
+        return int64_t
+    if annotation is float:
+        return double64_t
+    if annotation is bool:
+        return bool_t
+    name = getattr(annotation, '__name__', None)
+    if name is not None:
+        return {'int32': int32_t, 'int64': int64_t, 'float32': float32_t,
+                'float64': double64_t, 'bool_': bool_t}.get(name)
     if isinstance(annotation, ast.Name):
         return {'int': int64_t, 'int64': int64_t, 'int32': int32_t,
                 'float': double64_t, 'float64': double64_t, 'float32': float32_t,
@@ -23,7 +39,15 @@ def get_type_hint(annotation):
 
 class ASTVisitor(ast.NodeVisitor):
     def __call__(self, source):
+        self._evaluated_annotations = {}
         if isinstance(source, (types.FunctionType, types.LambdaType, types.ModuleType)):
+            if isinstance(source, (types.FunctionType, types.LambdaType)):
+                try:
+                    self._evaluated_annotations = inspect.get_annotations(source, eval_str=True)
+                except (NameError, TypeError, ValueError):
+                    # The source AST remains useful when a forward reference cannot
+                    # be resolved in the function's defining module.
+                    self._evaluated_annotations = {}
             source = dedent(inspect.getsource(source))
         elif isinstance(source, str):
             source = dedent(source)
@@ -38,8 +62,18 @@ class ASTVisitor(ast.NodeVisitor):
         return self.visit(functions[0])
 
     def visit_FunctionDef(self, node):
-        args = [core.Var(arg.arg, get_type_hint(arg.annotation), arg) for arg in node.args.args]
-        return core.Fun(node.name, args, [self.visit(stmt) for stmt in node.body], get_type_hint(node.returns), node)
+        args = []
+        for arg in node.args.args:
+            annotation = self._evaluated_annotations.get(arg.arg, arg.annotation)
+            hint = get_type_hint(annotation)
+            if arg.annotation is not None and hint is None:
+                raise CompileError(f'unsupported annotation for {arg.arg}', arg.annotation)
+            args.append(core.Var(arg.arg, hint, arg))
+        return_annotation = self._evaluated_annotations.get('return', node.returns)
+        hint = get_type_hint(return_annotation)
+        if node.returns is not None and hint is None:
+            raise CompileError('unsupported return annotation', node.returns)
+        return core.Fun(node.name, args, [self.visit(stmt) for stmt in node.body], hint, node)
 
     def visit_Name(self, node): return core.Var(node.id, source=node)
 
@@ -68,14 +102,20 @@ class ASTVisitor(ast.NodeVisitor):
 
     def visit_AnnAssign(self, node):
         if node.value is None: raise CompileError('annotation without a value is not supported', node)
-        return self._assign_target(node.target, self.visit(node.value), get_type_hint(node.annotation), node)
+        hint = get_type_hint(node.annotation)
+        if hint is None: raise CompileError('unsupported variable annotation', node.annotation)
+        return self._assign_target(node.target, self.visit(node.value), hint, node)
 
     def visit_AugAssign(self, node):
         opname = core.PRIM_OPS.get(type(node.op))
-        if opname is None or not isinstance(node.target, ast.Name):
-            raise CompileError('augmented assignment currently requires a supported name target', node)
-        ref = core.Var(node.target.id, source=node.target)
-        return core.Assign(node.target.id, core.Prim(opname, [ref, self.visit(node.value)], node), source=node)
+        if opname is None: raise CompileError('unsupported augmented assignment operator', node)
+        if isinstance(node.target, ast.Name):
+            ref = core.Var(node.target.id, source=node.target)
+            return core.Assign(node.target.id, core.Prim(opname, [ref, self.visit(node.value)], node), source=node)
+        if isinstance(node.target, ast.Subscript):
+            value, indices = self._subscript_parts(node.target)
+            return core.AugStoreIndex(value, indices, opname, self.visit(node.value), node)
+        raise CompileError('unsupported augmented assignment target', node.target)
 
     def visit_BinOp(self, node):
         opname = core.PRIM_OPS.get(type(node.op))

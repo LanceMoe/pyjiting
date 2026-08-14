@@ -30,6 +30,13 @@ class StoreIndex(Node):
         super().__init__(source); self.value = value; self.indices = indices; self.rhs = rhs
 
 
+class AugStoreIndex(Node):
+    _fields = ('value', 'indices', 'fn', 'rhs')
+    def __init__(self, value, indices, fn, rhs, source=None):
+        super().__init__(source); self.value, self.indices, self.fn, self.rhs = value, indices, fn, rhs
+        self.operand_type = None
+
+
 class Return(Node):
     _fields = ('value',)
     def __init__(self, value, source=None): super().__init__(source); self.value = value

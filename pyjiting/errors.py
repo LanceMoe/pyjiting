@@ -11,5 +11,9 @@ class InferError(CompileError):
     """Raised when a program cannot be assigned a valid static type."""
 
 
+class InfiniteType(InferError):
+    """Raised when unification would construct an infinite type."""
+
+
 class CodegenError(CompileError):
     """Raised when a typed program cannot be lowered to LLVM IR."""

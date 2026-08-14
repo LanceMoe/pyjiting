@@ -11,6 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "pyright>=1.1.400",
     "pytest>=8.3",
 ]
 
@@ -24,3 +25,11 @@ packages = ["pyjiting"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.pyright]
+include = ["pyjiting", "tests"]
+exclude = [".venv", ".mypy_cache", ".pytest_cache", "__pycache__"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "basic"

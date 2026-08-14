@@ -1,3 +1,5 @@
+# pyright: reportOptionalMemberAccess=false, reportAttributeAccessIssue=false
+
 import ast as py_ast
 import ctypes
 
@@ -17,6 +19,11 @@ ir_i64 = ir.IntType(64)
 ir_f32 = ir.FloatType()
 ir_f64 = ir.DoubleType()
 ir_void = ir.VoidType()
+
+ERROR_NONE = 0
+ERROR_DIVISION_BY_ZERO = 1
+ERROR_RANGE_STEP_ZERO = 2
+ERROR_ARRAY_DIMENSION_MISMATCH = 3
 
 
 def array_type(element):
@@ -49,6 +56,7 @@ class LLVMCodeGen:
         self.locals, self.arrays, self.shapes = {}, {}, {}
         self.break_blocks, self.continue_blocks = [], []
         self.exit_block = self.return_slot = None
+        self.error_ptr = None
         self.org_func_name = None
         self.counter = 0
 
@@ -63,7 +71,8 @@ class LLVMCodeGen:
         raise CodegenError(f'local {name} was not allocated during function setup')
 
     def start_function(self, name):
-        self.function = ir.Function(self.module, ir.FunctionType(to_lltype(self.return_type), [to_lltype(ty) for ty in self.args]), name)
+        arg_types = [to_lltype(ty) for ty in self.args] + [ir.PointerType(ir_i32)]
+        self.function = ir.Function(self.module, ir.FunctionType(to_lltype(self.return_type), arg_types), name)
         entry = self.function.append_basic_block('entry')
         self.exit_block = self.function.append_basic_block('exit')
         self.builder = ir.IRBuilder(entry)
@@ -109,17 +118,50 @@ class LLVMCodeGen:
         else: raise CodegenError(f'cannot use {ty} as a condition')
         return self.builder.zext(result, ir_i64) if normalize else result
 
+    def guard_nonzero(self, value, ty, error_code):
+        if is_float(ty):
+            is_nonzero = self.builder.fcmp_ordered('!=', value, ir.Constant(value.type, 0.0))
+        else:
+            is_nonzero = self.builder.icmp_signed('!=', value, ir.Constant(value.type, 0))
+        continue_block = self.new_block('nonzero')
+        error_block = self.new_block('runtime_error')
+        self.builder.cbranch(is_nonzero, continue_block, error_block)
+        self.set_block(error_block)
+        self.builder.store(ir.Constant(ir_i32, error_code), self.error_ptr)
+        self.builder.branch(self.exit_block)
+        self.set_block(continue_block)
+
+    def guard(self, condition, error_code):
+        continue_block = self.new_block('guard_pass')
+        error_block = self.new_block('runtime_error')
+        self.builder.cbranch(condition, continue_block, error_block)
+        self.set_block(error_block)
+        self.builder.store(ir.Constant(ir_i32, error_code), self.error_ptr)
+        self.builder.branch(self.exit_block)
+        self.set_block(continue_block)
+
+    def propagate_error(self):
+        clean_block = self.new_block('error_clear')
+        error_block = self.new_block('error_propagate')
+        is_clean = self.builder.icmp_signed('==', self.builder.load(self.error_ptr), ir.Constant(ir_i32, ERROR_NONE))
+        self.builder.cbranch(is_clean, clean_block, error_block)
+        self.set_block(error_block)
+        self.builder.branch(self.exit_block)
+        self.set_block(clean_block)
+
     def visit_Fun(self, node):
         self.org_func_name = node.fname
         self.start_function(mangler(node.fname, self.args))
         local_types = {}
-        for item in py_ast.walk(node):
+        for item in self.walk_nodes(node):
             if isinstance(item, core.Assign): local_types[item.ref] = item.type
             elif isinstance(item, core.Loop): local_types[item.var.id] = int64_t
         if self.return_type != void_t:
             self.return_slot = self.builder.alloca(to_lltype(self.return_type), name='retval')
         for name, ty in local_types.items():
             self.locals[name] = self.builder.alloca(to_lltype(ty), name=name)
+        self.error_ptr = self.function.args[-1]
+        self.error_ptr.name = 'error'
         for core_arg, ll_arg, ty in zip(node.args, self.function.args, self.args):
             ll_arg.name = core_arg.id
             if is_array(ty):
@@ -136,6 +178,18 @@ class LLVMCodeGen:
         self.finish_function()
         return self.function
 
+    def walk_nodes(self, node):
+        if isinstance(node, list):
+            for item in node:
+                yield from self.walk_nodes(item)
+            return
+        if not isinstance(node, py_ast.AST):
+            return
+        yield node
+        for _, value in py_ast.iter_fields(node):
+            if isinstance(value, (py_ast.AST, list)):
+                yield from self.walk_nodes(value)
+
     def visit_LitInt(self, node): return ir.Constant(to_lltype(node.type), node.n)
     def visit_LitFloat(self, node): return ir.Constant(to_lltype(node.type), node.n)
     def visit_LitBool(self, node): return ir.Constant(ir_i64, int(node.n))
@@ -146,6 +200,8 @@ class LLVMCodeGen:
     def _index_address(self, value, indices):
         if not isinstance(value, core.Var) or value.id not in self.arrays: raise CodegenError('only parameter arrays can be indexed', value)
         metadata = self.arrays[value.id]
+        dimension_matches = self.builder.icmp_signed('==', metadata['ndim'], ir.Constant(ir_i64, len(indices)))
+        self.guard(dimension_matches, ERROR_ARRAY_DIMENSION_MISMATCH)
         offset = ir.Constant(ir_i64, 0)
         for dim, index in enumerate(indices):
             stride_ptr = self.builder.gep(metadata['strides'], [ir.Constant(ir_i64, dim)])
@@ -172,6 +228,28 @@ class LLVMCodeGen:
         address, element = self._index_address(node.value, node.indices)
         value = self.cast(self.visit(node.rhs), node.rhs.type, element)
         self.builder.store(value, address)
+
+    def visit_AugStoreIndex(self, node):
+        address, element = self._index_address(node.value, node.indices)
+        left = self.cast(self.builder.load(address), element, node.operand_type)
+        right = self.cast(self.visit(node.rhs), node.rhs.type, node.operand_type)
+        if node.fn == 'add#': result = self.builder.fadd(left, right) if is_float(node.type) else self.builder.add(left, right)
+        elif node.fn == 'sub#': result = self.builder.fsub(left, right) if is_float(node.type) else self.builder.sub(left, right)
+        elif node.fn == 'mult#': result = self.builder.fmul(left, right) if is_float(node.type) else self.builder.mul(left, right)
+        elif node.fn == 'div#':
+            self.guard_nonzero(right, node.operand_type, ERROR_DIVISION_BY_ZERO)
+            result = self.builder.fdiv(self.cast(left, node.operand_type, node.type), self.cast(right, node.operand_type, node.type))
+        elif node.fn == 'floordiv#':
+            self.guard_nonzero(right, node.operand_type, ERROR_DIVISION_BY_ZERO)
+            result = self.builder.call(self._llvm_floor(node.type), [self.builder.fdiv(left, right)]) if is_float(node.type) else self._integer_floor_div(left, right)
+        elif node.fn == 'mod#':
+            self.guard_nonzero(right, node.operand_type, ERROR_DIVISION_BY_ZERO)
+            result = self._float_mod(left, right) if is_float(node.type) else self._integer_mod(left, right)
+        elif node.fn == 'pow#':
+            result = self._pow_values(node, left, right)
+        else:
+            raise CodegenError(f'unsupported augmented assignment primitive {node.fn}', node)
+        self.builder.store(self.cast(result, node.type, element), address)
 
     def _compare(self, op, left, right, ty):
         if is_float(ty):
@@ -233,12 +311,16 @@ class LLVMCodeGen:
         if node.fn == 'sub#': return self.builder.fsub(left, right) if is_float(node.type) else self.builder.sub(left, right)
         if node.fn == 'mult#': return self.builder.fmul(left, right) if is_float(node.type) else self.builder.mul(left, right)
         if node.fn == 'div#':
+            self.guard_nonzero(right, node.operand_type, ERROR_DIVISION_BY_ZERO)
             return self.builder.fdiv(self.cast(left, node.operand_type, node.type), self.cast(right, node.operand_type, node.type))
         if node.fn == 'floordiv#':
+            self.guard_nonzero(right, node.operand_type, ERROR_DIVISION_BY_ZERO)
             if is_float(node.type):
                 division = self.builder.fdiv(left, right); floor = self._llvm_floor(node.type); return self.builder.call(floor, [division])
             return self._integer_floor_div(left, right)
-        if node.fn == 'mod#': return self._float_mod(left, right) if is_float(node.type) else self._integer_mod(left, right)
+        if node.fn == 'mod#':
+            self.guard_nonzero(right, node.operand_type, ERROR_DIVISION_BY_ZERO)
+            return self._float_mod(left, right) if is_float(node.type) else self._integer_mod(left, right)
         if node.fn == 'pow#': return self._pow(node, left, right)
         raise CodegenError(f'unknown primitive {node.fn}', node)
 
@@ -269,11 +351,14 @@ class LLVMCodeGen:
         return self.builder.fadd(remainder, self.builder.select(correction, right, ir.Constant(right.type, 0.0)))
 
     def _pow(self, node, left, right):
+        return self._pow_values(node, left, right)
+
+    def _pow_values(self, node, left, right):
         if is_float(node.type):
             ty = to_lltype(node.type); name = 'llvm.pow.f32' if node.type == float32_t else 'llvm.pow.f64'
             fn = self.module.globals.get(name) or ir.Function(self.module, ir.FunctionType(ty, [ty, ty]), name)
             return self.builder.call(fn, [self.cast(left, node.operand_type, node.type), self.cast(right, node.operand_type, node.type)])
-        exponent = node.args[1].n
+        exponent = node.rhs.n if isinstance(node, core.AugStoreIndex) else node.args[1].n
         result = ir.Constant(to_lltype(node.type), 1); base = left
         while exponent:
             if exponent & 1: result = self.builder.mul(result, base)
@@ -317,7 +402,7 @@ class LLVMCodeGen:
         otherwise = self.new_block('for_else') if node.orelse else after
         self.builder.branch(init); self.set_block(init)
         ptr = self.locals[node.var.id]; self.builder.store(self.cast(self.visit(node.begin), node.begin.type, int64_t), ptr); self.builder.branch(test)
-        self.set_block(test); step = self.cast(self.visit(node.step), node.step.type, int64_t); current = self.builder.load(ptr); stop = self.cast(self.visit(node.end), node.end.type, int64_t)
+        self.set_block(test); step = self.cast(self.visit(node.step), node.step.type, int64_t); self.guard_nonzero(step, int64_t, ERROR_RANGE_STEP_ZERO); current = self.builder.load(ptr); stop = self.cast(self.visit(node.end), node.end.type, int64_t)
         positive = self.builder.icmp_signed('>', step, ir.Constant(ir_i64, 0)); negative = self.builder.icmp_signed('<', step, ir.Constant(ir_i64, 0)); less = self.builder.icmp_signed('<', current, stop); greater = self.builder.icmp_signed('>', current, stop)
         condition = self.builder.select(positive, less, self.builder.select(negative, greater, ir.Constant(ir_i1, 0))); self.builder.cbranch(condition, body, otherwise if node.orelse else after)
         self.break_blocks.append(after); self.continue_blocks.append(latch)
@@ -339,7 +424,10 @@ class LLVMCodeGen:
 
     def visit_CallFunc(self, node):
         args = [self.visit(arg) for arg in node.args]
-        if node.fn.id == self.org_func_name: return self.builder.call(self.function, args)
+        if node.fn.id == self.org_func_name:
+            result = self.builder.call(self.function, args + [self.error_ptr])
+            self.propagate_error()
+            return result
         registered = get_registered(node.fn.id)
         if registered is None: raise CodegenError(f'function {node.fn.id!r} is not registered', node)
         fn, signature = registered; ll_args = [to_lltype(ty) for ty in signature.args]; ll_return = to_lltype(signature.return_type)

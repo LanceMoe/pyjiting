@@ -1,7 +1,14 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalSubscript=false
+
 import ctypes
 
 import numpy as np
 from llvmlite import ir
+
+
+ERROR_DIVISION_BY_ZERO = 1
+ERROR_RANGE_STEP_ZERO = 2
+ERROR_ARRAY_DIMENSION_MISMATCH = 3
 
 
 _scalar_ctypes = {1: ctypes.c_int8, 8: ctypes.c_int8, 16: ctypes.c_int16, 32: ctypes.c_int32, 64: ctypes.c_int64}
@@ -56,10 +63,18 @@ def wrap_function(func, engine):
     return cfunc
 
 
-def dispatcher(fn):
-    def call(*args): return fn(*(wrap_arg(arg, value) for arg, value in zip(fn._argtypes_, args)))
+def dispatcher(fn, user_arg_count):
+    def call(*args):
+        error = ctypes.c_int32(0)
+        values = [wrap_arg(arg, value) for arg, value in zip(fn._argtypes_[:user_arg_count], args)]
+        result = fn(*values, ctypes.byref(error))
+        if error.value == ERROR_DIVISION_BY_ZERO: raise ZeroDivisionError('division by zero')
+        if error.value == ERROR_RANGE_STEP_ZERO: raise ValueError('range() arg 3 must not be zero')
+        if error.value == ERROR_ARRAY_DIMENSION_MISMATCH:
+            raise ValueError('array index count does not match array dimensions')
+        return result
     call.__name__ = fn.__name__
     return call
 
 
-def wrap_module(sig, llfunc, engine): return dispatcher(wrap_function(llfunc, engine))
+def wrap_module(sig, llfunc, engine): return dispatcher(wrap_function(llfunc, engine), len(sig))
