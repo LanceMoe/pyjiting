@@ -1,3 +1,5 @@
+**Languages:** [English](README.md) · [简体中文](README.zh.md) · [日本語](README.ja.md)
+
 # Pyjiting
 
 Pyjiting is an experimental Python JIT compiler, which is the product of my undergraduate thesis. The goal is to implement a light-weight miniature general-purpose Python JIT compiler, using LLVM (via [llvmlite](https://llvmlite.readthedocs.io/)) as the backend.
@@ -67,15 +69,34 @@ The number of indices must match the runtime array dimensionality; a mismatch ra
 Each specialization uses a private LLVM symbol derived from the decorated Python function identity plus its type signature. Two functions with the same short name therefore cannot share a cached native implementation by accident.
 ## Requirements
 - Python >= 3.12
-- llvmlite >= 0.44 (new LLVM pass manager API)
-- numpy
+- [uv](https://docs.astral.sh/uv/)
+- llvmlite >= 0.49.0
+- numpy >= 2.5.2
 
-## Development
+Project dependencies are declared in `pyproject.toml` and locked in `uv.lock`. Use
+`uv` to create the environment and run all project commands; `requirements.txt` is
+not part of the development workflow.
+
+## Development with uv
 
 ```bash
-pip install -e .[dev]
-pytest -q
+uv sync --extra dev
+uv run pytest -q
+uv run pyright
 ```
+
+`uv sync` creates or updates the local `.venv` from the locked dependency set. The
+project is installed into that environment, so examples can be run directly with
+`uv run`.
+
+Build distributable artifacts with:
+
+```bash
+uv build
+```
+
+The source distribution and wheel are written to `dist/`.
+
 ## Usage
 
 ### JIT compile a function
@@ -145,7 +166,7 @@ def find_primes(n):
     return 0
 ```
 
-### Run the benchmarks
+### Run the examples
 
 ```bash
 uv run examples/example_fib.py
@@ -163,7 +184,7 @@ uv run examples/example_mixed_types.py
 
 ## Performance
 
-Run the focused benchmark with uv run benchmarks/benchmark.py. It reports cold compilation plus execution, a warm cached call, and an equivalent CPython loop. The workload uses a dynamic modular reduction so its loop body cannot be reduced to a closed-form counter calculation.
+Run the focused benchmark with `uv run benchmarks/benchmark.py`. It reports cold compilation plus execution, a warm cached call, and an equivalent CPython loop. The workload uses a dynamic modular reduction so its loop body cannot be reduced to a closed-form counter calculation.
 
 You can find the source code of these test samples in the `examples/` directory.
 
