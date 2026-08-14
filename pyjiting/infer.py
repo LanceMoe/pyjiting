@@ -15,7 +15,7 @@ def naming():
     k = 0
     while True:
         for a in string.ascii_lowercase:
-            yield f'\{a}{str(k)}' if (k > 0) else a
+            yield f'\\{a}{str(k)}' if (k > 0) else a
         k = k+1
 
 

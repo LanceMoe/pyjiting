@@ -28,7 +28,9 @@ def debug(fmt, *args):
     print(fmt, *args)
 
 
-llvm.initialize()
+# Note: llvmlite.binding.initialize() is deprecated since llvmlite 0.44 and now
+# raises a RuntimeError. The native target/asmprinter initialization is still
+# required before any code generation can happen.
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 
@@ -118,14 +120,13 @@ def codegen(module, ast, specializer, return_type, args):
     mod = llvm.parse_assembly(str(module))
     mod.verify()
 
-    pmb = llvm.PassManagerBuilder()
-    pmb.opt_level = 3
-    pmb.loop_vectorize = True
-
-    pm = llvm.ModulePassManager()
-    pmb.populate(pm)
-
-    pm.run(mod)
+    # New pass manager (llvmlite >= 0.44): build per-module default pipeline
+    # at opt level 3 with loop vectorization enabled.
+    pto = llvm.create_pipeline_tuning_options(speed_level=3)
+    pto.loop_vectorization = True
+    pb = llvm.create_pass_builder(target_machine, pto)
+    pm = pb.getModulePassManager()
+    pm.run(mod, pb)
 
     engine.add_module(mod)
 

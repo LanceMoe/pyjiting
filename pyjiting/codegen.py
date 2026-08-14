@@ -3,7 +3,6 @@ from collections import defaultdict
 from ctypes import c_int64, c_void_p
 import ctypes
 
-import llvmlite.llvmpy.core as lc
 from llvmlite import ir
 
 from pyjiting.ll_types import mangler
@@ -157,8 +156,9 @@ class LLVMCodeGen(object):
         elif isinstance(value, float):
             return ir.Constant(ir_double_t, value)
         elif isinstance(value, str):
-            # raise NotImplementedError
-            return lc.Constant.stringz(value)
+            # Null-terminated constant string
+            return ir.Constant(ir.ArrayType(ir.IntType(8), len(value) + 1),
+                              bytearray(value.encode('utf-8') + b'\x00'))
         else:
             print(value, type(value))
             raise NotImplementedError
