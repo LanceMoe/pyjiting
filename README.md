@@ -59,6 +59,8 @@ Pyjiting compiles a function to native code when it is first called. A function 
 
 pyjiting uses fixed-width Int32/Int64 values, not arbitrary-precision Python integers. Mixed scalar operations use deterministic promotion: int32 widens to int64 as needed, float32 widens to float64 when combined with int64 or float64, and `/` produces a floating result. Assignment allows widening only, so a Python `int` must be explicitly converted to `np.int32` before storing into an int32 array.
 
+Integer arithmetic follows two's-complement fixed-width behavior. In particular, the minimum signed integer divided by -1 remains the minimum signed integer, rather than attempting arbitrary-precision promotion.
+
 Arrays use a stable `data/ndim/shape/strides` ABI. Element reads and writes support multidimensional, transposed, sliced and negative-stride NumPy views. Bounds checks, array creation, broadcasting and whole-array ufunc operations are deliberately not supported.
 The number of indices must match the runtime array dimensionality; a mismatch raises `ValueError`.
 
@@ -234,6 +236,7 @@ This is a research/educational project, not a production JIT. Among others:
 - A non-void JIT function must return on every control-flow path.
 - Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.
 - Registered (`@reg`) functions need supported scalar annotations and must not raise across the callback boundary.
+- Default, keyword-only, variadic and keyword call arguments are rejected. JIT calls accept exactly their declared positional argument count.
 - Python strings, containers, unpacking assignment, arbitrary objects, bounds checks and array-wide NumPy operations are unsupported.
 # Special thanks
 

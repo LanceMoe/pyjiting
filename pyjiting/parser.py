@@ -75,8 +75,10 @@ class ASTVisitor(ast.NodeVisitor):
         return self.visit(functions[0])
 
     def visit_FunctionDef(self, node):
+        if node.args.defaults or node.args.kw_defaults or node.args.vararg or node.args.kwarg or node.args.kwonlyargs:
+            raise CompileError('default, keyword-only, and variadic parameters are not supported', node.args)
         args = []
-        for arg in node.args.args:
+        for arg in [*node.args.posonlyargs, *node.args.args]:
             annotation = self._evaluated_annotations.get(arg.arg, arg.annotation)
             hint = get_type_hint(annotation)
             if arg.annotation is not None and hint is None and not is_dynamic_array_annotation(annotation):
@@ -184,6 +186,8 @@ class ASTVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node):
         if not isinstance(node.func, ast.Name): raise CompileError('only calls to named functions are supported', node)
+        if node.keywords:
+            raise CompileError('keyword arguments are not supported', node)
         return core.CallFunc(self.visit(node.func), [self.visit(arg) for arg in node.args], node)
 
     def visit_Attribute(self, node):

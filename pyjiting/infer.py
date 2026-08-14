@@ -163,7 +163,7 @@ class TypeInferencer:
         for stmt in node.orelse: self._visit_statement(stmt)
 
     def visit_Loop(self, node):
-        if isinstance(node.step, core.LitInt) and node.step.n == 0:
+        if core.integer_constant_value(node.step) == 0:
             raise InferError('range() arg 3 must not be zero', node.step)
         for value in (node.begin, node.end, node.step): self._coerce(self.visit(value), int64_t, value)
         self.env[node.var.id] = int64_t; node.var.type = int64_t

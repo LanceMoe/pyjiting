@@ -329,19 +329,48 @@ class LLVMCodeGen:
         return self.module.globals.get(name) or ir.Function(self.module, ir.FunctionType(to_lltype(ty), [to_lltype(ty)]), name)
 
     def _integer_floor_div(self, left, right):
-        quotient = self.builder.sdiv(left, right)
-        remainder = self.builder.srem(left, right)
+        quotient, remainder = self._truncating_divmod(left, right)
         has_remainder = self.builder.icmp_signed('!=', remainder, ir.Constant(left.type, 0))
         different_sign = self.builder.icmp_signed('<', self.builder.xor(left, right), ir.Constant(left.type, 0))
         correction = self.builder.and_(has_remainder, different_sign)
         return self.builder.sub(quotient, self.builder.zext(correction, left.type))
 
     def _integer_mod(self, left, right):
-        remainder = self.builder.srem(left, right)
+        _, remainder = self._truncating_divmod(left, right)
         has_remainder = self.builder.icmp_signed('!=', remainder, ir.Constant(left.type, 0))
         different_sign = self.builder.icmp_signed('<', self.builder.xor(left, right), ir.Constant(left.type, 0))
         correction = self.builder.and_(has_remainder, different_sign)
         return self.builder.add(remainder, self.builder.select(correction, right, ir.Constant(right.type, 0)))
+
+    def _truncating_divmod(self, left, right):
+        """Lower signed div/rem without LLVM poison for MIN_INT / -1."""
+        width = left.type.width
+        minimum = ir.Constant(left.type, -(1 << (width - 1)))
+        minus_one = ir.Constant(right.type, -1)
+        is_minimum = self.builder.icmp_signed('==', left, minimum)
+        is_minus_one = self.builder.icmp_signed('==', right, minus_one)
+        overflow = self.builder.and_(is_minimum, is_minus_one)
+        normal_block = self.new_block('divmod_normal')
+        overflow_block = self.new_block('divmod_overflow')
+        end_block = self.new_block('divmod_end')
+        self.builder.cbranch(overflow, overflow_block, normal_block)
+
+        self.set_block(normal_block)
+        quotient = self.builder.sdiv(left, right)
+        remainder = self.builder.srem(left, right)
+        self.builder.branch(end_block)
+
+        self.set_block(overflow_block)
+        self.builder.branch(end_block)
+
+        self.set_block(end_block)
+        quotient_result = self.builder.phi(left.type)
+        quotient_result.add_incoming(quotient, normal_block)
+        quotient_result.add_incoming(minimum, overflow_block)
+        remainder_result = self.builder.phi(left.type)
+        remainder_result.add_incoming(remainder, normal_block)
+        remainder_result.add_incoming(ir.Constant(left.type, 0), overflow_block)
+        return quotient_result, remainder_result
 
     def _float_mod(self, left, right):
         remainder = self.builder.frem(left, right)

@@ -63,3 +63,17 @@ def test_parser_rejects_unknown_annotations_with_a_location():
             def bad(value: complex):
                 return value
         ''')
+
+
+@pytest.mark.parametrize(
+    ('source', 'message'),
+    [
+        ('def defaulted(value=1):\n    return value', 'default, keyword-only, and variadic parameters'),
+        ('def keyword_only(*, value):\n    return value', 'default, keyword-only, and variadic parameters'),
+        ('def variadic(*values):\n    return 0', 'default, keyword-only, and variadic parameters'),
+        ('def caller(value):\n    return callee(value=value)', 'keyword arguments are not supported'),
+    ],
+)
+def test_parser_rejects_parameter_and_call_forms_outside_the_subset(source, message):
+    with pytest.raises(CompileError, match=message):
+        ASTVisitor()(source)

@@ -70,7 +70,10 @@ def jit(fn):
     tree = ASTVisitor()(fn)
     identity = '\0'.join((fn.__module__, fn.__qualname__, fn.__code__.co_filename, str(fn.__code__.co_firstlineno))).encode()
     tree.symbol = 'jit_' + hashlib.sha256(identity).hexdigest()[:16]
-    def wrapper(*args): return compile_specialization(tree, [arg_pytype(arg) for arg in args])(*args)
+    def wrapper(*args):
+        if len(args) != len(tree.args):
+            raise TypeError(f'{fn.__name__}() takes {len(tree.args)} positional arguments but {len(args)} were given')
+        return compile_specialization(tree, [arg_pytype(arg) for arg in args])(*args)
     wrapper.__name__, wrapper.__doc__, wrapper.__wrapped__ = fn.__name__, fn.__doc__, fn
     return wrapper
 
