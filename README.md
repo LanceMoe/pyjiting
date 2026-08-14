@@ -43,16 +43,17 @@ Pyjiting compiles a function to native code when it is first called. A function 
 4. **Codegen** — LLVM IR is generated for that signature and compiled to native code with the LLVM optimizer and MCJIT engine.
 5. **Caching** — each specialized signature is compiled only once and cached by its mangled name; subsequent calls with the same types dispatch directly to the native code.
 
-## Features
+## Supported subset
 
-- [x] LLVM backend via llvmlite, optimized at `-O3` with loop vectorization (new pass manager).
-- [x] Automatic type specialization on first call; a separate native binary is compiled per argument-type combination (e.g. `int` vs `float`).
-- [x] Arithmetic (`+ - * / // % **`), unary negation, scalar comparison and short-circuit boolean operators.
-- [x] Control flow: `if`, `for` loops over `range` (with `break`, `continue`, negative steps and `else`), and `while` loops with `else`.
-- [x] Recursion (self-calls compile to native calls).
-- [x] Calling ordinary Python functions from JITed native code through libffi-style callbacks — register them with the `@reg` decorator and annotate their types (see `examples/example_find_primes.py`).
-- [x] Scalar types: `int` (i64), `float` (f64), `bool`; int32/int64/float32/float64 NumPy arrays with strided multidimensional access and assignment.
-- [x] Deterministic specialization names and an isolated LLVM module per specialization.
+| Area | Supported behavior | Regression coverage |
+|---|---|---|
+| Specialization | Separate native specialization per scalar/array signature, deterministic names, isolated LLVM modules and same-name function isolation | `tests/test_specialization.py` |
+| Scalars | Bool, Int32, Int64, Float32 and Float64; deterministic widening and fixed-width integer wraparound | `tests/test_infer.py`, `tests/test_arith.py` |
+| Arithmetic | `+ - * / // % **`, unary `-`, Python floor/mod signs, constant integer powers, NaN-aware scalar truthiness | `tests/test_arith.py` |
+| Control flow | `if`, `while`, `for range`, `break`, `continue`, negative/dynamic steps, nested loops and loop `else` | `tests/test_control_flow.py`, `tests/test_runtime_errors.py` |
+| Arrays | int32/int64/float32/float64 ndarrays; strided multidimensional reads/writes, shape indexing, transposed/sliced/F-order/negative-stride views | `tests/test_array.py`, `tests/test_abi.py` |
+| Annotations and callbacks | Scalar annotations, deferred `np.ndarray` dtype specialization, and persistent annotated `@reg` callbacks | `tests/test_parser.py`, `tests/test_reg_callback.py` |
+| Validation | Parser source locations, inference rules and LLVM verification for generated modules | `tests/test_parser.py`, `tests/test_codegen.py` |
 
 ### Numeric and array semantics
 
@@ -60,6 +61,8 @@ pyjiting uses fixed-width Int32/Int64 values, not arbitrary-precision Python int
 
 Arrays use a stable `data/ndim/shape/strides` ABI. Element reads and writes support multidimensional, transposed, sliced and negative-stride NumPy views. Bounds checks, array creation, broadcasting and whole-array ufunc operations are deliberately not supported.
 The number of indices must match the runtime array dimensionality; a mismatch raises `ValueError`.
+
+Each specialization uses a private LLVM symbol derived from the decorated Python function identity plus its type signature. Two functions with the same short name therefore cannot share a cached native implementation by accident.
 ## Requirements
 - Python >= 3.12
 - llvmlite >= 0.44 (new LLVM pass manager API)
@@ -157,6 +160,8 @@ uv run examples/example_mixed_types.py
 ```
 
 ## Performance
+
+Run the focused benchmark with uv run benchmarks/benchmark.py. It reports cold compilation plus execution, a warm cached call, and an equivalent CPython loop. The workload uses a dynamic modular reduction so its loop body cannot be reduced to a closed-form counter calculation.
 
 You can find the source code of these test samples in the `examples/` directory.
 

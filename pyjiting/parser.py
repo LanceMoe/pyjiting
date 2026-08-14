@@ -37,9 +37,22 @@ def get_type_hint(annotation):
     return None
 
 
+def is_dynamic_array_annotation(annotation):
+    """Return whether an annotation deliberately defers ndarray dtype to a call."""
+    if isinstance(annotation, str):
+        try:
+            annotation = ast.parse(annotation, mode='eval').body
+        except SyntaxError:
+            return False
+    if isinstance(annotation, ast.Attribute):
+        return annotation.attr == 'ndarray'
+    return getattr(annotation, '__name__', None) == 'ndarray'
+
+
 class ASTVisitor(ast.NodeVisitor):
     def __call__(self, source):
         self._evaluated_annotations = {}
+        self._loop_depth = 0
         if isinstance(source, (types.FunctionType, types.LambdaType, types.ModuleType)):
             if isinstance(source, (types.FunctionType, types.LambdaType)):
                 try:
@@ -66,7 +79,7 @@ class ASTVisitor(ast.NodeVisitor):
         for arg in node.args.args:
             annotation = self._evaluated_annotations.get(arg.arg, arg.annotation)
             hint = get_type_hint(annotation)
-            if arg.annotation is not None and hint is None:
+            if arg.annotation is not None and hint is None and not is_dynamic_array_annotation(annotation):
                 raise CompileError(f'unsupported annotation for {arg.arg}', arg.annotation)
             args.append(core.Var(arg.arg, hint, arg))
         return_annotation = self._evaluated_annotations.get('return', node.returns)
@@ -139,7 +152,15 @@ class ASTVisitor(ast.NodeVisitor):
         return core.Compare(self.visit(node.left), ops, [self.visit(value) for value in node.comparators], node)
 
     def visit_If(self, node): return core.If(self.visit(node.test), [self.visit(x) for x in node.body], [self.visit(x) for x in node.orelse], node)
-    def visit_While(self, node): return core.While(self.visit(node.test), [self.visit(x) for x in node.body], [self.visit(x) for x in node.orelse], node)
+
+    def _visit_loop_body(self, statements):
+        self._loop_depth += 1
+        try:
+            return [self.visit(statement) for statement in statements]
+        finally:
+            self._loop_depth -= 1
+
+    def visit_While(self, node): return core.While(self.visit(node.test), self._visit_loop_body(node.body), [self.visit(x) for x in node.orelse], node)
 
     def visit_For(self, node):
         if not isinstance(node.target, ast.Name) or not isinstance(node.iter, ast.Call) or not isinstance(node.iter.func, ast.Name) or node.iter.func.id not in ('range', 'xrange'):
@@ -149,10 +170,15 @@ class ASTVisitor(ast.NodeVisitor):
         begin, end, step = core.LitInt(0, node), args[0], core.LitInt(1, node)
         if len(args) >= 2: begin, end = args[0], args[1]
         if len(args) == 3: step = args[2]
-        return core.Loop(core.Var(node.target.id, source=node.target), begin, end, [self.visit(x) for x in node.body], step, [self.visit(x) for x in node.orelse], node)
+        return core.Loop(core.Var(node.target.id, source=node.target), begin, end, self._visit_loop_body(node.body), step, [self.visit(x) for x in node.orelse], node)
 
-    def visit_Break(self, node): return core.Break(node)
-    def visit_Continue(self, node): return core.Continue(node)
+    def visit_Break(self, node):
+        if self._loop_depth == 0: raise CompileError('break outside loop', node)
+        return core.Break(node)
+
+    def visit_Continue(self, node):
+        if self._loop_depth == 0: raise CompileError('continue outside loop', node)
+        return core.Continue(node)
     def visit_Pass(self, node): return core.Noop(node)
     def visit_Expr(self, node): return core.Expr(self.visit(node.value), node)
 

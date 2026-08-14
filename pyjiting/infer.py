@@ -92,10 +92,11 @@ class TypeInferencer:
         rhs_ty = self.visit(node.rhs)
         common = promote_numeric(array_ty.b, rhs_ty)
         if common is None: raise InferError(f'{node.fn} requires numeric operands', node)
-        if node.fn == 'pow#' and is_integer(array_ty.b) and is_integer(rhs_ty) and not isinstance(node.rhs, core.LitInt):
+        exponent = core.integer_constant_value(node.rhs) if node.fn == 'pow#' else None
+        if node.fn == 'pow#' and is_integer(array_ty.b) and is_integer(rhs_ty) and exponent is None:
             raise InferError('integer power requires a constant exponent', node)
         result = double64_t if node.fn == 'div#' and is_integer(common) else common
-        if node.fn == 'pow#' and isinstance(node.rhs, core.LitInt) and node.rhs.n < 0: result = double64_t
+        if node.fn == 'pow#' and exponent is not None and exponent < 0: result = double64_t
         node.operand_type = common
         node.type = self._coerce(result, array_ty.b, node)
 
@@ -116,12 +117,13 @@ class TypeInferencer:
             if node.fn == 'div#': return self._numeric(node, True)
             if node.fn == 'pow#':
                 left, right = self.visit(node.args[0]), self.visit(node.args[1])
-                if is_integer(left) and is_integer(right) and not isinstance(node.args[1], core.LitInt):
+                exponent = core.integer_constant_value(node.args[1])
+                if is_integer(left) and is_integer(right) and exponent is None:
                     raise InferError('integer power requires a constant exponent', node)
                 common = promote_numeric(left, right)
                 if common is None: raise InferError('pow requires numeric operands', node)
                 node.operand_type = common
-                node.type = double64_t if isinstance(node.args[1], core.LitInt) and node.args[1].n < 0 else common
+                node.type = double64_t if exponent is not None and exponent < 0 else common
                 return node.type
             return self._numeric(node)
         if node.fn == 'neg#':

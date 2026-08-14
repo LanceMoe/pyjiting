@@ -114,13 +114,13 @@ class LLVMCodeGen:
 
     def truthy(self, value, ty, normalize=False):
         if ty == bool_t or is_integer(ty): result = self.builder.icmp_signed('!=', value, ir.Constant(value.type, 0))
-        elif is_float(ty): result = self.builder.fcmp_ordered('!=', value, ir.Constant(value.type, 0.0))
+        elif is_float(ty): result = self.builder.fcmp_unordered('!=', value, ir.Constant(value.type, 0.0))
         else: raise CodegenError(f'cannot use {ty} as a condition')
         return self.builder.zext(result, ir_i64) if normalize else result
 
     def guard_nonzero(self, value, ty, error_code):
         if is_float(ty):
-            is_nonzero = self.builder.fcmp_ordered('!=', value, ir.Constant(value.type, 0.0))
+            is_nonzero = self.builder.fcmp_unordered('!=', value, ir.Constant(value.type, 0.0))
         else:
             is_nonzero = self.builder.icmp_signed('!=', value, ir.Constant(value.type, 0))
         continue_block = self.new_block('nonzero')
@@ -151,7 +151,7 @@ class LLVMCodeGen:
 
     def visit_Fun(self, node):
         self.org_func_name = node.fname
-        self.start_function(mangler(node.fname, self.args))
+        self.start_function(mangler(node.symbol, self.args))
         local_types = {}
         for item in self.walk_nodes(node):
             if isinstance(item, core.Assign): local_types[item.ref] = item.type
@@ -358,7 +358,9 @@ class LLVMCodeGen:
             ty = to_lltype(node.type); name = 'llvm.pow.f32' if node.type == float32_t else 'llvm.pow.f64'
             fn = self.module.globals.get(name) or ir.Function(self.module, ir.FunctionType(ty, [ty, ty]), name)
             return self.builder.call(fn, [self.cast(left, node.operand_type, node.type), self.cast(right, node.operand_type, node.type)])
-        exponent = node.rhs.n if isinstance(node, core.AugStoreIndex) else node.args[1].n
+        exponent_node = node.rhs if isinstance(node, core.AugStoreIndex) else node.args[1]
+        exponent = core.integer_constant_value(exponent_node)
+        if exponent is None: raise CodegenError('integer power requires a constant exponent', node)
         result = ir.Constant(to_lltype(node.type), 1); base = left
         while exponent:
             if exponent & 1: result = self.builder.mul(result, base)

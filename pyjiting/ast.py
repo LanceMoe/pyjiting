@@ -70,7 +70,12 @@ class CallFunc(Node):
 class Fun(Node):
     _fields = ('fname', 'args', 'body')
     def __init__(self, fname, args, body, return_annotation=None, source=None):
-        super().__init__(source); self.fname, self.args, self.body, self.return_annotation = fname, args, body, return_annotation
+        super().__init__(); self.fname, self.args, self.body, self.return_annotation = fname, args, body, return_annotation
+        self.symbol = fname
+        if source is not None:
+            for name in ('lineno', 'col_offset', 'end_lineno', 'end_col_offset'):
+                if hasattr(source, name):
+                    setattr(self, name, getattr(source, name))
 
 
 class LitInt(Node):
@@ -106,6 +111,15 @@ class Expr(Node):
 class Noop(Node): pass
 class Break(Node): pass
 class Continue(Node): pass
+
+
+def integer_constant_value(node):
+    if isinstance(node, LitInt):
+        return node.n
+    if isinstance(node, Prim) and node.fn == 'neg#' and len(node.args) == 1:
+        value = integer_constant_value(node.args[0])
+        return -value if value is not None else None
+    return None
 
 
 PRIM_OPS = {

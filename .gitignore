@@ -258,6 +258,7 @@ cython_debug/
 
 # Local History for Visual Studio Code
 .history/
+plans/
 
 ### VisualStudioCode Patch ###
 # Ignore all local history of files
