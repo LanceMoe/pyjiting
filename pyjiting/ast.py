@@ -94,12 +94,14 @@ class Fun(Node):
 
 class LitInt(Node):
     _fields = ('n',)
-    def __init__(self, n, source=None): super().__init__(source); self.n = int(n)
+    def __init__(self, n, source=None, literal_type=None):
+        super().__init__(source); self.n, self.literal_type = int(n), literal_type
 
 
 class LitFloat(Node):
     _fields = ('n',)
-    def __init__(self, n, source=None): super().__init__(source); self.n = float(n)
+    def __init__(self, n, source=None, literal_type=None):
+        super().__init__(source); self.n, self.literal_type = float(n), literal_type
 
 
 class LitBool(Node):

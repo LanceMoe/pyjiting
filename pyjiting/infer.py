@@ -1,9 +1,9 @@
 from . import ast as core
 from .errors import InferError
-from .intrinsics import STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS
-from .types import (FuncType, bool_t, can_widen, double64_t, int64_t, is_array,
-                    is_integer, is_numeric, is_string, is_truthy_type,
-                    promote_numeric, shape_t, str_t, void_t)
+from .intrinsics import MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS
+from .types import (FuncType, bool_t, can_widen, double64_t, float32_t, int32_t,
+                    int64_t, is_array, is_integer, is_numeric, is_string,
+                    is_truthy_type, promote_numeric, shape_t, str_t, void_t)
 
 
 class UnderDetermined(InferError):
@@ -69,8 +69,8 @@ class TypeInferencer:
             for item in stmt: self._visit_statement(item)
         else: self.visit(stmt)
 
-    def visit_LitInt(self, node): node.type = int64_t; return node.type
-    def visit_LitFloat(self, node): node.type = double64_t; return node.type
+    def visit_LitInt(self, node): node.type = node.literal_type or int64_t; return node.type
+    def visit_LitFloat(self, node): node.type = node.literal_type or double64_t; return node.type
     def visit_LitBool(self, node): node.type = bool_t; return node.type
     def visit_LitStr(self, node): node.type = str_t; return node.type
 
@@ -244,6 +244,25 @@ class TypeInferencer:
             if len(arg_types) != 1 or not is_integer(arg_types[0]):
                 raise InferError('chr expects one integer argument', node)
             node.type = str_t; return str_t
+        if node.fn.id in MATH_INTRINSICS:
+            if len(arg_types) != 1 or not is_numeric(arg_types[0]):
+                raise InferError(f'{node.fn.id} expects one numeric argument', node)
+            node.operand_type = double64_t
+            node.type = bool_t if node.fn.id in ('math.isnan', 'math.isinf', 'math.isfinite') else double64_t
+            return node.type
+        if node.fn.id in ('sum', 'any', 'all'):
+            if len(arg_types) != 1 or not is_array(arg_types[0]):
+                raise InferError(f'{node.fn.id} expects one array argument', node)
+            element = arg_types[0].b
+            if node.fn.id in ('any', 'all'):
+                node.type = bool_t
+            elif element in (int32_t, bool_t):
+                node.type = int64_t
+            elif element == float32_t:
+                node.type = double64_t
+            else:
+                node.type = element
+            return node.type
         if node.fn.id in STRING_INTRINSICS and node.fn.id in ('str.startswith', 'str.endswith'):
             if arg_types != [str_t, str_t]: raise InferError(f'{node.fn.id[4:]} expects one string argument', node)
             node.type = bool_t; return bool_t

@@ -56,8 +56,9 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 | 演算 | `+ - * / // % **`、単項 `-`、Python 互換の floor/mod 符号規則、定数整数べき乗、NaN を考慮した真理値判定 | `tests/test_arith.py` |
 | 制御フロー | `if`、`while`、`range`、一次元配列／文字列の反復、`break`、`continue`、ループ `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 文字列 | Unicode 値、比較／包含判定、完全なスライス、連結／反復、変換、文字種判定、検索、`ord`／`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
-| 配列 | 4 種の数値 dtype、境界検査付き負添字、ストライド付き多次元読み書き、shape 添字、一次元反復 | `tests/test_array.py`、`tests/test_abi.py`、`tests/test_extensions.py` |
-| 組み込み関数 | 静的型付き `len`、`abs`、2 引数の `min`／`max`、`ord`、`chr` | `tests/test_extensions.py`、`tests/test_string_phase2.py` |
+| 配列 | 4 種の数値 dtype、安全な添字、多次元 Strided アクセス、一次元反復、`sum`／`any`／`all` リダクション | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
+| 組み込み関数 | スカラ／文字列関数と、ネイティブ `math` の三角・平方根・指数・対数・分類・定数 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
+| 定数 | `@jit` 適用時に不変スカラ／文字列のグローバルおよびクロージャ値をキャプチャ | `tests/test_numeric_phase3.py` |
 | アノテーションとコールバック | スカラ／文字列アノテーション、`np.ndarray` dtype の遅延特化、型注釈付き `@reg` | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 検証 | パーサのソース位置保持、推論ルール検証、生成された LLVM モジュールのバリデーション | `tests/test_parser.py`、`tests/test_codegen.py` |
 
@@ -68,6 +69,9 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 整数演算は 2 の補数表現による固定幅の挙動に準拠します。特に、符号付き最小整数を -1 で割った場合でも任意精度への昇格は行われず、オーバーフローして符号付き最小整数のままとなります。
 
 配列は安定した `data/ndim/shape/strides` ABI を採用します。要素と shape の負添字および境界検査に対応し、範囲外は `IndexError`、添字数の不一致は `ValueError` になります。配列生成、ブロードキャスト、配列全体の ufunc は未対応です。
+一次元 Strided 配列ではネイティブ `sum`、`any`、`all` を利用でき、int32/float32 の和は int64/float64 へ拡張され、空配列の単位元は Python と一致します。
+
+不変の数値／文字列グローバルおよびクロージャ値は `@jit` 適用時に Core リテラルとして固定されます。ネイティブ `math` は `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮動小数点分類、標準定数に対応し、domain/range エラーは JIT エラー ABI で伝播します。
 
 文字列は長さ付き UTF-32 ABI を使用し、Unicode コードポイントと埋め込み NUL を保持します。一時値と戻り値は呼び出し単位の arena で管理されます。スライスは省略、正、負、動的な非ゼロ step に対応し、包含判定、Unicode 大小文字変換、空白除去、置換、文字種判定、`ord`／`chr` は静的サブセット内で Python の意味論に従います。
 
@@ -270,7 +274,7 @@ pyjiting/
 * 整数のべき乗（`**`）は、指数部がコンパイル時定数である必要があります（動的な負の指数は静的に戻り型を一意に決定できないため）。
 * `@reg` 関数はサポート対象のスカラ型または文字列型アノテーションを完全に備える必要があり、コールバック境界を跨いで例外を投げることはできません。
 * デフォルト引数、キーワード専用引数、可変長引数（`*args`, `**kwargs`）、キーワード引数による呼び出しはサポートしていません。JIT 関数の呼び出しは、宣言された位置引数の数と厳密に一致する必要があります。
-* 組み込みコンテナ、アンパック代入、任意の Python オブジェクト、多次元配列の直接反復、NumPy 配列全体のベクトル演算は未対応です。
+* 可変グローバル、組み込みコンテナ、アンパック代入、任意の Python オブジェクト、多次元配列のリダクション／反復、axis、NumPy 配列全体のベクトル演算は未対応です。
 
 # 謝辞
 

@@ -56,8 +56,9 @@ Pyjiting 在函数首次被调用时将其 JIT 编译为原生机器码。被 `@
 | 算术 | `+ - * / // % **`、一元 `-`、符合 Python 规范的 floor/mod 符号语义、常量整数幂、适配 NaN 的标量真值判定 | `tests/test_arith.py` |
 | 控制流 | `if`、`while`、`for in range(...)`、一维数组/字符串迭代、`break`、`continue`、循环 `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 字符串 | Unicode 值、比较/成员判断、完整切片、拼接/重复、大小写/去空白/替换、字符谓词、搜索及 `ord`/`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
-| 数组 | 四种数值 dtype；带边界检查的负索引、多维 Strided 读写、形状索引及一维迭代 | `tests/test_array.py`、`tests/test_abi.py`、`tests/test_extensions.py` |
-| 内建函数 | 静态类型化的 `len`、`abs`、双参数 `min`/`max`、`ord` 和 `chr` | `tests/test_extensions.py`、`tests/test_string_phase2.py` |
+| 数组 | 四种数值 dtype；安全索引、多维 Strided 读写、一维迭代及 `sum`/`any`/`all` 归约 | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
+| 内建函数 | 标量/字符串内建函数，以及原生 `math` 三角、开方、指数、对数、分类与常量 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
+| 常量 | 在应用 `@jit` 时捕获不可变的标量/字符串全局及闭包值 | `tests/test_numeric_phase3.py` |
 | 注解与回调 | 标量/字符串注解、`np.ndarray` dtype 惰性特化、带注解的 `@reg` 回调 | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 验证机制 | 解析器源码位置映射、推导规则校验、LLVM 生成模块合法性验证 | `tests/test_parser.py`、`tests/test_codegen.py` |
 
@@ -68,6 +69,9 @@ Pyjiting 采用定宽的 Int32/Int64，而非 Python 原生的任意精度大整
 整数运算严格遵循二进制补码的定宽语义。特别地，最小有符号负数除以 `-1` 时不会自动提升精度，而是直接发生溢出并保留为最小有符号负数。
 
 数组采用稳定的 `data/ndim/shape/strides` ABI。元素和 shape 索引支持负数并进行边界检查，越界抛出 `IndexError`；索引维度数不匹配则抛出 `ValueError`。数组创建、广播及整组 ufunc 运算仍不支持。
+一维 Strided 数组支持原生 `sum`、`any` 和 `all`；int32/float32 求和提升为 int64/float64，空数组身份值与 Python 一致。
+
+不可变的数值/字符串全局与闭包值会在应用 `@jit` 时冻结为 Core 字面量。原生 `math` 支持 `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮点分类及常量；domain/range 异常沿 JIT 错误 ABI 传播。
 
 字符串采用带长度的 UTF-32 ABI，可正确处理 Unicode 码点和内嵌 NUL。临时值与返回值由单次调用 arena 管理。切片支持省略、正数、负数和动态非零步长；成员判断、Unicode 大小写转换、去空白、替换、字符谓词及 `ord`/`chr` 在静态子集内遵循 Python 语义。
 
@@ -270,7 +274,7 @@ pyjiting/
 * 整数幂运算（`**`）的指数必须为编译期常量（因动态负指数无法推导确定单一的静态返回类型）。
 * 使用 `@reg` 注册的回调函数必须提供完整的标量或字符串类型注解，且不能跨边界抛出异常。
 * 不支持默认参数、仅限关键字参数、可变长参数（`*args`, `**kwargs`）及关键字实参调用。调用实参数量必须与声明的形参严格匹配。
-* 暂不支持内置容器（List/Dict 等）、解包赋值、任意 Python 对象、多维数组直接迭代及针对整组数组的 NumPy 矢量化操作。
+* 暂不支持可变全局、内置容器、解包赋值、任意 Python 对象、多维数组归约/迭代、归约 axis 及整组 NumPy 矢量化操作。
 
 # 特别致谢
 

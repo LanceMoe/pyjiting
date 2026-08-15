@@ -7,7 +7,8 @@ from llvmlite import ir
 
 from . import ast as core
 from .errors import CodegenError
-from .intrinsics import STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS
+from .intrinsics import (MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES,
+                         STRING_TRANSFORMS)
 from .ll_types import mangler
 from .registry import get as get_registered, keep_callback
 from .types import (bool_t, double64_t, float32_t, int32_t, int64_t, is_array,
@@ -28,6 +29,8 @@ ERROR_DIVISION_BY_ZERO = 1
 ERROR_RANGE_STEP_ZERO = 2
 ERROR_ARRAY_DIMENSION_MISMATCH = 3
 ERROR_INDEX_OUT_OF_BOUNDS = 4
+ERROR_MATH_DOMAIN = 8
+ERROR_MATH_RANGE = 9
 
 
 def array_type(element):
@@ -590,6 +593,11 @@ class LLVMCodeGen:
             result = self._runtime_call('chr', string_type(), [ir_i64, ir.PointerType(ir_i32)],
                                         [value, self.error_ptr])
             self.propagate_error(); return result
+        if node.fn.id in MATH_INTRINSICS:
+            value = self.cast(args[0], node.args[0].type, double64_t)
+            return self._math_intrinsic(node.fn.id[5:], value)
+        if node.fn.id in ('sum', 'any', 'all'):
+            return self._array_reduction(node, node.fn.id)
         if node.fn.id in STRING_INTRINSICS:
             name = node.fn.id[4:]
             if node.fn.id in STRING_TRANSFORMS:
@@ -633,6 +641,76 @@ class LLVMCodeGen:
         callback = ctypes.CFUNCTYPE(c_return, *c_args)(bridge); address = keep_callback(node.fn.id, callback)
         pointer_ty = ir.PointerType(ir.FunctionType(ll_return, ll_args)); pointer = self.builder.inttoptr(ir.Constant(ir_i64, address), pointer_ty)
         return self.builder.call(pointer, args)
+
+    def _math_intrinsic(self, name, value):
+        infinity = ir.Constant(ir_f64, float('inf'))
+        negative_infinity = ir.Constant(ir_f64, float('-inf'))
+        is_positive_infinite = self.builder.fcmp_ordered('==', value, infinity)
+        is_negative_infinite = self.builder.fcmp_ordered('==', value, negative_infinity)
+        is_infinite = self.builder.or_(is_positive_infinite, is_negative_infinite)
+        is_nan = self.builder.fcmp_unordered('!=', value, value)
+        if name == 'isnan': return self.builder.zext(is_nan, ir_i64)
+        if name == 'isinf': return self.builder.zext(is_infinite, ir_i64)
+        if name == 'isfinite': return self.builder.zext(self.builder.not_(self.builder.or_(is_nan, is_infinite)), ir_i64)
+
+        if name in ('sin', 'cos'):
+            self.guard(self.builder.not_(is_infinite), ERROR_MATH_DOMAIN)
+        elif name == 'sqrt':
+            nonnegative = self.builder.fcmp_ordered('>=', value, ir.Constant(ir_f64, 0.0))
+            self.guard(self.builder.or_(is_nan, nonnegative), ERROR_MATH_DOMAIN)
+        elif name in ('log', 'log2', 'log10'):
+            positive = self.builder.fcmp_ordered('>', value, ir.Constant(ir_f64, 0.0))
+            self.guard(self.builder.or_(is_nan, positive), ERROR_MATH_DOMAIN)
+
+        llvm_name = f'llvm.{name}.f64'
+        intrinsic = self.module.globals.get(llvm_name) or ir.Function(
+            self.module, ir.FunctionType(ir_f64, [ir_f64]), llvm_name)
+        result = self.builder.call(intrinsic, [value])
+        if name == 'exp':
+            result_is_infinite = self.builder.fcmp_ordered('==', result, infinity)
+            finite_input = self.builder.not_(self.builder.or_(is_nan, is_infinite))
+            self.guard(self.builder.not_(self.builder.and_(finite_input, result_is_infinite)), ERROR_MATH_RANGE)
+        return result
+
+    def _array_reduction(self, node, operation):
+        argument = node.args[0]
+        if not isinstance(argument, core.Var) or argument.id not in self.arrays:
+            raise CodegenError(f'{operation} only supports parameter arrays', argument)
+        metadata = self.arrays[argument.id]
+        dimension_matches = self.builder.icmp_signed('==', metadata['ndim'], ir.Constant(ir_i64, 1))
+        self.guard(dimension_matches, ERROR_ARRAY_DIMENSION_MISMATCH)
+        result_type = to_lltype(node.type)
+        initial = 1 if operation == 'all' else 0
+        initial_value = ir.Constant(result_type, float(initial) if is_float(node.type) else initial)
+        result_ptr = self.builder.alloca(result_type, name=f'{operation}_result_{self.counter}')
+        index_ptr = self.builder.alloca(ir_i64, name=f'{operation}_index_{self.counter}')
+        self.counter += 1
+        self.builder.store(initial_value, result_ptr)
+        self.builder.store(ir.Constant(ir_i64, 0), index_ptr)
+        test = self.new_block(f'{operation}_test')
+        body = self.new_block(f'{operation}_body')
+        after = self.new_block(f'{operation}_after')
+        self.builder.branch(test)
+        self.set_block(test)
+        index = self.builder.load(index_ptr)
+        length = self.builder.load(metadata['shape'])
+        self.builder.cbranch(self.builder.icmp_signed('<', index, length), body, after)
+        self.set_block(body)
+        stride = self.builder.load(metadata['strides'])
+        element = self.builder.load(self.builder.gep(metadata['data'], [self.builder.mul(index, stride)]))
+        if operation == 'sum':
+            widened = self.cast(element, metadata['element'], node.type)
+            current = self.builder.load(result_ptr)
+            updated = self.builder.fadd(current, widened) if is_float(node.type) else self.builder.add(current, widened)
+        else:
+            truth = self.truthy(element, metadata['element'], normalize=True)
+            current = self.builder.load(result_ptr)
+            updated = self.builder.or_(current, truth) if operation == 'any' else self.builder.and_(current, truth)
+        self.builder.store(updated, result_ptr)
+        self.builder.store(self.builder.add(index, ir.Constant(ir_i64, 1)), index_ptr)
+        self.builder.branch(test)
+        self.set_block(after)
+        return self.builder.load(result_ptr)
 
     def _runtime_call(self, name, return_type, arg_types, args):
         pointer_type = ir.PointerType(ir.FunctionType(return_type, arg_types))

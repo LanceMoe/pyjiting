@@ -1,11 +1,12 @@
 import ast
 import inspect
+import math
 import types
 from textwrap import dedent
 
 from . import ast as core
 from .errors import CompileError
-from .intrinsics import STRING_METHODS
+from .intrinsics import MATH_CONSTANTS, MATH_FUNCTIONS, STRING_METHODS
 from .types import bool_t, double64_t, float32_t, int32_t, int64_t, str_t
 
 
@@ -55,6 +56,8 @@ def is_dynamic_array_annotation(annotation):
 class ASTVisitor(ast.NodeVisitor):
     def __call__(self, source):
         self._evaluated_annotations = {}
+        self._constants = {}
+        self._local_names = set()
         self._loop_depth = 0
         if isinstance(source, (types.FunctionType, types.LambdaType, types.ModuleType)):
             if isinstance(source, (types.FunctionType, types.LambdaType)):
@@ -64,6 +67,8 @@ class ASTVisitor(ast.NodeVisitor):
                     # The source AST remains useful when a forward reference cannot
                     # be resolved in the function's defining module.
                     self._evaluated_annotations = {}
+                closure = inspect.getclosurevars(source)
+                self._constants = {**closure.globals, **closure.nonlocals}
             source = dedent(inspect.getsource(source))
         elif isinstance(source, str):
             source = dedent(source)
@@ -81,6 +86,10 @@ class ASTVisitor(ast.NodeVisitor):
         if node.args.defaults or node.args.kw_defaults or node.args.vararg or node.args.kwarg or node.args.kwonlyargs:
             raise CompileError('default, keyword-only, and variadic parameters are not supported', node.args)
         args = []
+        self._local_names = {arg.arg for arg in [*node.args.posonlyargs, *node.args.args]}
+        for item in ast.walk(node):
+            if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
+                self._local_names.add(item.id)
         for arg in [*node.args.posonlyargs, *node.args.args]:
             annotation = self._evaluated_annotations.get(arg.arg, arg.annotation)
             hint = get_type_hint(annotation)
@@ -93,14 +102,33 @@ class ASTVisitor(ast.NodeVisitor):
             raise CompileError('unsupported return annotation', node.returns)
         return core.Fun(node.name, args, [self.visit(stmt) for stmt in node.body], hint, node)
 
-    def visit_Name(self, node): return core.Var(node.id, source=node)
+    def _literal(self, value, node):
+        try:
+            import numpy as np
+            value_type = type(value)
+            if value_type is np.bool_: return core.LitBool(value, node)
+            if value_type is np.int32: return core.LitInt(value, node, int32_t)
+            if value_type is np.int64: return core.LitInt(value, node, int64_t)
+            if value_type is np.float32: return core.LitFloat(value, node, float32_t)
+            if value_type is np.float64: return core.LitFloat(value, node, double64_t)
+        except ImportError:
+            pass
+        if isinstance(value, bool): return core.LitBool(value, node)
+        if isinstance(value, int):
+            if not -(1 << 63) <= value < (1 << 63):
+                raise CompileError('integer constant is outside the supported Int64 range', node)
+            return core.LitInt(value, node)
+        if isinstance(value, float): return core.LitFloat(value, node)
+        if isinstance(value, str): return core.LitStr(value, node)
+        raise CompileError(f'global {getattr(node, "id", "value")!r} is not an immutable supported constant', node)
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Load) and node.id not in self._local_names and node.id in self._constants:
+            return self._literal(self._constants[node.id], node)
+        return core.Var(node.id, source=node)
 
     def visit_Constant(self, node):
-        if isinstance(node.value, bool): return core.LitBool(node.value, node)
-        if isinstance(node.value, int): return core.LitInt(node.value, node)
-        if isinstance(node.value, float): return core.LitFloat(node.value, node)
-        if isinstance(node.value, str): return core.LitStr(node.value, node)
-        raise CompileError(f'unsupported constant {node.value!r}', node)
+        return self._literal(node.value, node)
 
     def visit_Return(self, node):
         if node.value is None: raise CompileError('bare return is not supported', node)
@@ -195,14 +223,30 @@ class ASTVisitor(ast.NodeVisitor):
         if node.keywords:
             raise CompileError('keyword arguments are not supported', node)
         if isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name):
+                module_name = node.func.value.id
+                module_value = self._constants.get(module_name, math if module_name == 'math' else None)
+            else:
+                module_value = None
+            if module_value is math and module_name not in self._local_names:
+                if node.func.attr not in MATH_FUNCTIONS:
+                    raise CompileError(f'unsupported math function {node.func.attr!r}', node.func)
+                return core.CallFunc(core.Var(f'math.{node.func.attr}', source=node.func),
+                                     [self.visit(arg) for arg in node.args], node)
             if node.func.attr not in STRING_METHODS:
                 raise CompileError(f'unsupported method {node.func.attr!r}', node.func)
             return core.CallFunc(core.Var(f'str.{node.func.attr}', source=node.func),
                                  [self.visit(node.func.value), *[self.visit(arg) for arg in node.args]], node)
         if not isinstance(node.func, ast.Name): raise CompileError('only calls to named functions are supported', node)
-        return core.CallFunc(self.visit(node.func), [self.visit(arg) for arg in node.args], node)
+        return core.CallFunc(core.Var(node.func.id, source=node.func),
+                             [self.visit(arg) for arg in node.args], node)
 
     def visit_Attribute(self, node):
+        if isinstance(node.value, ast.Name):
+            module_name = node.value.id
+            module_value = self._constants.get(module_name, math if module_name == 'math' else None)
+            if module_value is math and module_name not in self._local_names and node.attr in MATH_CONSTANTS:
+                return core.LitFloat(getattr(math, node.attr), node, double64_t)
         if node.attr == 'shape': return core.Prim('shape#', [self.visit(node.value)], node)
         raise CompileError('unsupported attribute access', node)
 

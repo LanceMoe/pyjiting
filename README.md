@@ -54,8 +54,9 @@ Pyjiting compiles a function to native code when it is first called. A function 
 | Arithmetic | `+ - * / // % **`, unary `-`, Python floor/mod signs, constant integer powers, NaN-aware scalar truthiness | `tests/test_arith.py` |
 | Control flow | `if`, `while`, `for range`, one-dimensional array/string iteration, `break`, `continue`, negative/dynamic steps, nested loops and loop `else` | `tests/test_control_flow.py`, `tests/test_extensions.py` |
 | Strings | Unicode values, comparison/membership, full slicing, concat/repeat, transforms, predicates, search, and `ord`/`chr` | `tests/test_string.py`, `tests/test_string_phase2.py` |
-| Arrays | int32/int64/float32/float64 ndarrays; checked negative indexing, strided multidimensional reads/writes, shape indexing and one-dimensional iteration | `tests/test_array.py`, `tests/test_abi.py`, `tests/test_extensions.py` |
-| Intrinsics | Typed `len`, `abs`, two-argument `min`/`max`, `ord`, and `chr` | `tests/test_extensions.py`, `tests/test_string_phase2.py` |
+| Arrays | Four numeric ndarray dtypes; checked indexing, strided multidimensional access, one-dimensional iteration, and `sum`/`any`/`all` reductions | `tests/test_array.py`, `tests/test_extensions.py`, `tests/test_numeric_phase3.py` |
+| Intrinsics | Typed scalar/string builtins plus native `math` trigonometry, roots, exponentials, logarithms, classification and constants | `tests/test_extensions.py`, `tests/test_string_phase2.py`, `tests/test_numeric_phase3.py` |
+| Constants | Immutable scalar/string globals and closure values captured when `@jit` is applied | `tests/test_numeric_phase3.py` |
 | Annotations and callbacks | Scalar/string annotations, deferred `np.ndarray` dtype specialization, and persistent annotated `@reg` callbacks | `tests/test_parser.py`, `tests/test_reg_callback.py`, `tests/test_extensions.py` |
 | Validation | Parser source locations, inference rules and LLVM verification for generated modules | `tests/test_parser.py`, `tests/test_codegen.py` |
 
@@ -66,6 +67,9 @@ pyjiting uses fixed-width Int32/Int64 values, not arbitrary-precision Python int
 Integer arithmetic follows two's-complement fixed-width behavior. In particular, the minimum signed integer divided by -1 remains the minimum signed integer, rather than attempting arbitrary-precision promotion.
 
 Arrays use a stable `data/ndim/shape/strides` ABI. Element reads and writes support checked negative indices and multidimensional, transposed, sliced and negative-stride NumPy views. Out-of-range element or shape indices raise `IndexError`; an index-count mismatch raises `ValueError`. Array creation, broadcasting and whole-array ufunc operations remain deliberately unsupported.
+One-dimensional strided arrays support native `sum`, `any`, and `all`; int32/float32 sums widen to int64/float64 and empty identities match Python.
+
+Immutable numeric and string globals/nonlocals are frozen into Core literals when `@jit` is applied. Native `math` support includes `sin`, `cos`, `sqrt`, `exp`, `log`, `log2`, `log10`, floating classification, and the standard constants. Domain and range failures use the JIT error ABI.
 
 Strings use a length-delimited UTF-32 ABI, so Unicode code-point indexing and embedded NUL characters are preserved. Temporary and returned strings live in a per-dispatch arena. Slices support omitted, positive, negative and dynamic non-zero steps. Membership, Unicode case transforms, whitespace trimming, replacement, character predicates, `ord` and `chr` follow Python semantics within the typed subset.
 
@@ -261,7 +265,7 @@ This is a research/educational project, not a production JIT. Among others:
 - Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.
 - Registered (`@reg`) functions need supported scalar or string annotations and must not raise across the callback boundary.
 - Default, keyword-only, variadic and keyword call arguments are rejected. JIT calls accept exactly their declared positional argument count.
-- Containers, unpacking assignment, arbitrary Python objects, multidimensional array iteration and array-wide NumPy operations are unsupported.
+- Mutable globals, containers, unpacking assignment, arbitrary Python objects, multidimensional reductions/iteration, reduction axes and array-wide NumPy operations are unsupported.
 # Special thanks
 
 Inspired by [numpile](https://dev.stephendiehl.com/numpile/) tutorial and continue to work on this basis.
