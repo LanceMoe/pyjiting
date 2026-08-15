@@ -11,13 +11,15 @@ from .intrinsics import (MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES,
                          STRING_TRANSFORMS)
 from .ll_types import mangler
 from .registry import get as get_registered, keep_callback
-from .types import (bool_t, double64_t, float32_t, int32_t, int64_t, is_array,
-                    is_float, is_integer, is_string, shape_t, str_t, void_t)
-from .string_runtime import (StringPointer, callback_address, literal_address,
-                             make_string, to_python)
+from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
+                    is_array, is_float, is_integer, is_string, is_tuple, shape_t,
+                    str_t, void_t)
+from .string_runtime import (StringPointer, allocation_address, callback_address,
+                             literal_address, make_string, to_python)
 
 
 ir_i1 = ir.IntType(1)
+ir_i8 = ir.IntType(8)
 ir_i32 = ir.IntType(32)
 ir_i64 = ir.IntType(64)
 ir_f32 = ir.FloatType()
@@ -57,6 +59,7 @@ TYPE_MAP = {
 
 def to_lltype(ty):
     if is_array(ty): return array_type(to_lltype(ty.b))
+    if is_tuple(ty): return ir.PointerType(ir.LiteralStructType([to_lltype(element) for element in ty.elements]))
     try: return TYPE_MAP[ty]
     except KeyError as error: raise CodegenError(f'no LLVM type for {ty}') from error
 
@@ -133,6 +136,7 @@ class LLVMCodeGen:
         elif is_string(ty):
             length = self.builder.load(self.builder.gep(value, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, 1)]))
             result = self.builder.icmp_signed('!=', length, ir.Constant(ir_i64, 0))
+        elif is_tuple(ty): result = ir.Constant(ir_i1, int(bool(ty.elements)))
         else: raise CodegenError(f'cannot use {ty} as a condition')
         return self.builder.zext(result, ir_i64) if normalize else result
 
@@ -173,6 +177,8 @@ class LLVMCodeGen:
         local_types = {}
         for item in self.walk_nodes(node):
             if isinstance(item, core.Assign): local_types[item.ref] = item.type
+            elif isinstance(item, core.UnpackAssign):
+                for name, ty in zip(item.refs, item.ref_types): local_types[name] = ty
             elif isinstance(item, core.Loop): local_types[item.var.id] = int64_t
             elif isinstance(item, core.ForEach): local_types[item.var.id] = item.var.type
         if self.return_type != void_t:
@@ -214,6 +220,17 @@ class LLVMCodeGen:
     def visit_LitBool(self, node): return ir.Constant(ir_i64, int(node.n))
     def visit_LitStr(self, node):
         return self.builder.inttoptr(ir.Constant(ir_i64, literal_address(node.value)), string_type())
+    def visit_LitTuple(self, node):
+        pointer_type = to_lltype(node.type)
+        null = ir.Constant(pointer_type, None)
+        size = self.builder.ptrtoint(self.builder.gep(null, [ir.Constant(ir_i64, 1)]), ir_i64)
+        allocator_type = ir.PointerType(ir.FunctionType(ir.PointerType(ir_i8), [ir_i64]))
+        allocator = self.builder.inttoptr(ir.Constant(ir_i64, allocation_address()), allocator_type)
+        pointer = self.builder.bitcast(self.builder.call(allocator, [size]), pointer_type)
+        for index, element in enumerate(node.elements):
+            address = self.builder.gep(pointer, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, index)])
+            self.builder.store(self.visit(element), address)
+        return pointer
     def visit_Var(self, node):
         if node.id in self.arrays: return self.locals[node.id]
         return self.builder.load(self.locals[node.id])
@@ -239,6 +256,10 @@ class LLVMCodeGen:
         return self.builder.gep(metadata['data'], [offset]), metadata['element']
 
     def visit_Index(self, node):
+        if is_tuple(node.value.type):
+            value = self.visit(node.value)
+            address = self.builder.gep(value, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, node.tuple_index)])
+            return self.builder.load(address)
         if is_string(node.value.type):
             value = self.visit(node.value); index = node.indices[0]
             if isinstance(index, core.Slice):
@@ -274,6 +295,13 @@ class LLVMCodeGen:
         ptr = self.locals.get(node.ref)
         if ptr is None: raise CodegenError(f'unknown local {node.ref}', node)
         self.builder.store(value, ptr)
+
+    def visit_UnpackAssign(self, node):
+        value = self.visit(node.value)
+        for index, name in enumerate(node.refs):
+            address = self.builder.gep(value, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, index)])
+            item = self.cast(self.builder.load(address), node.source_types[index], node.ref_types[index])
+            self.builder.store(item, self.locals[name])
 
     def visit_StoreIndex(self, node):
         address, element = self._index_address(node.value, node.indices)
@@ -564,6 +592,7 @@ class LLVMCodeGen:
         args = [self.visit(arg) for arg in node.args]
         if node.fn.id == 'len':
             value = args[0]
+            if is_tuple(node.args[0].type): return ir.Constant(ir_i64, len(node.args[0].type.elements))
             if is_string(node.args[0].type):
                 return self.builder.load(self.builder.gep(value, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, 1)]))
             if not isinstance(node.args[0], core.Var) or node.args[0].id not in self.arrays:

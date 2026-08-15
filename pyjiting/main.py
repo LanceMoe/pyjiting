@@ -15,7 +15,8 @@ from .infer import TypeInferencer
 from .ll_types import mangler, wrap_module
 from .parser import ASTVisitor
 from .registry import register, signatures
-from .types import bool_t, double64_t, float32_t, int32_t, int64_t, make_array_type, str_t
+from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
+                    is_array, is_tuple, make_array_type, str_t)
 
 
 DEBUG = False
@@ -36,6 +37,13 @@ def reg(fn): return register(fn)
 
 
 def arg_pytype(arg):
+    if isinstance(arg, tuple):
+        elements = [arg_pytype(element) for element in arg]
+        def contains_array(ty):
+            return is_array(ty) or (is_tuple(ty) and any(contains_array(item) for item in ty.elements))
+        if any(contains_array(element) for element in elements):
+            raise TypeError('ndarray elements inside tuples are not supported')
+        return TupleType(elements)
     if isinstance(arg, np.ndarray):
         dtype_map = {np.dtype(np.int32): int32_t, np.dtype(np.int64): int64_t, np.dtype(np.float32): float32_t, np.dtype(np.float64): double64_t}
         try: return make_array_type(dtype_map[np.dtype(arg.dtype)])

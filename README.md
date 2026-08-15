@@ -54,6 +54,7 @@ Pyjiting compiles a function to native code when it is first called. A function 
 | Arithmetic | `+ - * / // % **`, unary `-`, Python floor/mod signs, constant integer powers, NaN-aware scalar truthiness | `tests/test_arith.py` |
 | Control flow | `if`, `while`, `for range`, one-dimensional array/string iteration, `break`, `continue`, negative/dynamic steps, nested loops and loop `else` | `tests/test_control_flow.py`, `tests/test_extensions.py` |
 | Strings | Unicode values, comparison/membership, full slicing, concat/repeat, transforms, predicates, search, and `ord`/`chr` | `tests/test_string.py`, `tests/test_string_phase2.py` |
+| Tuples | Fixed heterogeneous literals/arguments/returns, nesting, annotations, constant indexing, `len`, truthiness and exact name unpacking | `tests/test_tuple_phase4.py` |
 | Arrays | Four numeric ndarray dtypes; checked indexing, strided multidimensional access, one-dimensional iteration, and `sum`/`any`/`all` reductions | `tests/test_array.py`, `tests/test_extensions.py`, `tests/test_numeric_phase3.py` |
 | Intrinsics | Typed scalar/string builtins plus native `math` trigonometry, roots, exponentials, logarithms, classification and constants | `tests/test_extensions.py`, `tests/test_string_phase2.py`, `tests/test_numeric_phase3.py` |
 | Constants | Immutable scalar/string globals and closure values captured when `@jit` is applied | `tests/test_numeric_phase3.py` |
@@ -72,6 +73,8 @@ One-dimensional strided arrays support native `sum`, `any`, and `all`; int32/flo
 Immutable numeric and string globals/nonlocals are frozen into Core literals when `@jit` is applied. Native `math` support includes `sin`, `cos`, `sqrt`, `exp`, `log`, `log2`, `log10`, floating classification, and the standard constants. Domain and range failures use the JIT error ABI.
 
 Strings use a length-delimited UTF-32 ABI, so Unicode code-point indexing and embedded NUL characters are preserved. Temporary and returned strings live in a per-dispatch arena. Slices support omitted, positive, negative and dynamic non-zero steps. Membership, Unicode case transforms, whitespace trimming, replacement, character predicates, `ord` and `chr` follow Python semantics within the typed subset.
+
+Tuples are immutable fixed-length structural types. A tuple's element types participate in specialization and mangling. Native values use pointers to shape-specific structures retained by the per-dispatch arena, avoiding platform-dependent aggregate-return ABIs. Python and JIT-to-JIT boundaries support nested numeric/string tuples.
 
 Each specialization uses a private LLVM symbol derived from the decorated Python function identity plus its type signature. Two functions with the same short name therefore cannot share a cached native implementation by accident.
 ## Requirements
@@ -265,7 +268,7 @@ This is a research/educational project, not a production JIT. Among others:
 - Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.
 - Registered (`@reg`) functions need supported scalar or string annotations and must not raise across the callback boundary.
 - Default, keyword-only, variadic and keyword call arguments are rejected. JIT calls accept exactly their declared positional argument count.
-- Mutable globals, containers, unpacking assignment, arbitrary Python objects, multidimensional reductions/iteration, reduction axes and array-wide NumPy operations are unsupported.
+- Mutable globals, lists/dicts, starred or nested unpack targets, dynamic tuple indexing, tuple mutation/comparison/iteration, arbitrary Python objects, multidimensional reductions/iteration, reduction axes and array-wide NumPy operations are unsupported.
 # Special thanks
 
 Inspired by [numpile](https://dev.stephendiehl.com/numpile/) tutorial and continue to work on this basis.

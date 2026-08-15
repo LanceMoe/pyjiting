@@ -1,4 +1,4 @@
-# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalSubscript=false
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalSubscript=false, reportGeneralTypeIssues=false
 
 import ctypes
 from typing import Any
@@ -7,7 +7,7 @@ import numpy as np
 from llvmlite import ir
 
 from .string_runtime import (StringDescriptor, StringPointer, begin_call, end_call,
-                             make_string, to_python)
+                             keep_alive, make_string, to_python)
 
 
 ERROR_DIVISION_BY_ZERO = 1
@@ -23,11 +23,13 @@ ERROR_MATH_RANGE = 9
 
 _scalar_ctypes = {1: ctypes.c_int8, 8: ctypes.c_int8, 16: ctypes.c_int16, 32: ctypes.c_int32, 64: ctypes.c_int64}
 _numpy_ctypes = {np.dtype(np.int32): ctypes.c_int32, np.dtype(np.int64): ctypes.c_int64, np.dtype(np.float32): ctypes.c_float, np.dtype(np.float64): ctypes.c_double}
+_tuple_ctypes = {}
 
 
 def type_repr(ty):
-    from .types import GenericType, array_t
+    from .types import GenericType, TupleType, array_t
     if isinstance(ty, GenericType) and ty.a == array_t: return f'arr_{type_repr(ty.b)}'
+    if isinstance(ty, TupleType): return 'tuple_' + '_'.join(type_repr(element) for element in ty.elements) + '_end'
     return {'Int32': 'i32', 'Int64': 'i64', 'Bool': 'bool', 'Float': 'f32', 'Double': 'f64',
             'String': 'str', 'Void': 'void'}.get(str(ty), str(ty).lower())
 
@@ -41,6 +43,13 @@ def wrap_type(llvm_type) -> Any:
     if isinstance(llvm_type, ir.FloatType): return ctypes.c_float
     if isinstance(llvm_type, ir.VoidType): return None
     if isinstance(llvm_type, ir.PointerType): return ctypes.POINTER(wrap_type(llvm_type.pointee))
+    if isinstance(llvm_type, ir.LiteralStructType):
+        key = str(llvm_type)
+        if key not in _tuple_ctypes:
+            fields = [(f'item_{index}', wrap_type(element)) for index, element in enumerate(llvm_type.elements)]
+            name = f'pyjiting_tuple_{len(_tuple_ctypes)}'
+            _tuple_ctypes[key] = type(name, (ctypes.Structure,), {'_fields_': fields, '_pyjiting_tuple': True})
+        return _tuple_ctypes[key]
     if isinstance(llvm_type, ir.IdentifiedStructType):
         if llvm_type.name == 'pyjiting.string': return StringDescriptor
         cached = getattr(llvm_type, '_pyjiting_ctype', None)
@@ -66,7 +75,36 @@ def wrap_arg(arg, value):
         data, ndim, shape, strides = wrap_ndarray(value)
         return arg._type_(data, ndim, shape, strides)
     if isinstance(value, str): return make_string(value)
+    if isinstance(value, tuple): return wrap_tuple(arg, value)
     return value
+
+
+def wrap_tuple(pointer_type, value):
+    structure_type = pointer_type._type_
+    if len(value) != len(structure_type._fields_): raise TypeError('tuple argument length does not match specialization')
+    converted = []
+    for item, (_, field_type) in zip(value, structure_type._fields_):
+        if item is not None and field_type == StringPointer:
+            converted.append(make_string(item))
+        elif isinstance(item, tuple) and issubclass(field_type, ctypes._Pointer):
+            converted.append(wrap_tuple(field_type, item))
+        else:
+            converted.append(item)
+    structure = structure_type(*converted); pointer = ctypes.pointer(structure)
+    keep_alive(structure, pointer)
+    return pointer
+
+
+def unwrap_tuple(pointer):
+    if not pointer: return ()
+    result = []
+    for name, field_type in pointer._type_._fields_:
+        value = getattr(pointer.contents, name)
+        if field_type == StringPointer: result.append(to_python(value))
+        elif issubclass(field_type, ctypes._Pointer) and getattr(field_type._type_, '_pyjiting_tuple', False):
+            result.append(unwrap_tuple(value))
+        else: result.append(value)
+    return tuple(result)
 
 
 def wrap_function(func, engine):
@@ -93,7 +131,11 @@ def dispatcher(fn, user_arg_count):
             if error.value == ERROR_CHR_RANGE: raise ValueError('chr() arg not in range(0x110000)')
             if error.value == ERROR_MATH_DOMAIN: raise ValueError('math domain error')
             if error.value == ERROR_MATH_RANGE: raise OverflowError('math range error')
-            return to_python(result) if fn._restype_ == StringPointer else result
+            if fn._restype_ == StringPointer: return to_python(result)
+            if (isinstance(fn._restype_, type) and issubclass(fn._restype_, ctypes._Pointer) and
+                    getattr(fn._restype_._type_, '_pyjiting_tuple', False)):
+                return unwrap_tuple(result)
+            return result
         finally:
             end_call()
     call.__name__ = fn.__name__

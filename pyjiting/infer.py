@@ -1,9 +1,9 @@
 from . import ast as core
 from .errors import InferError
 from .intrinsics import MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS
-from .types import (FuncType, bool_t, can_widen, double64_t, float32_t, int32_t,
-                    int64_t, is_array, is_integer, is_numeric, is_string,
-                    is_truthy_type, promote_numeric, shape_t, str_t, void_t)
+from .types import (FuncType, TupleType, bool_t, can_widen, double64_t, float32_t,
+                    int32_t, int64_t, is_array, is_integer, is_numeric, is_string,
+                    is_truthy_type, is_tuple, promote_numeric, shape_t, str_t, void_t)
 
 
 class UnderDetermined(InferError):
@@ -73,6 +73,9 @@ class TypeInferencer:
     def visit_LitFloat(self, node): node.type = node.literal_type or double64_t; return node.type
     def visit_LitBool(self, node): node.type = bool_t; return node.type
     def visit_LitStr(self, node): node.type = str_t; return node.type
+    def visit_LitTuple(self, node):
+        node.type = TupleType([self.visit(element) for element in node.elements])
+        return node.type
 
     def visit_Var(self, node):
         if node.id not in self.env: raise InferError(f'unknown variable {node.id}', node)
@@ -82,6 +85,17 @@ class TypeInferencer:
         value_ty = self.visit(node.value); expected = node.annotation or self.env.get(node.ref)
         node.type = self._coerce(value_ty, expected, node) if expected else value_ty
         self.env[node.ref] = node.type
+
+    def visit_UnpackAssign(self, node):
+        value_ty = self.visit(node.value)
+        if not is_tuple(value_ty): raise InferError('unpacking requires a tuple value', node.value)
+        if len(node.refs) != len(value_ty.elements):
+            raise InferError(f'cannot unpack tuple of length {len(value_ty.elements)} into {len(node.refs)} names', node)
+        node.source_types, node.ref_types = list(value_ty.elements), []
+        for name, ty in zip(node.refs, value_ty.elements):
+            target = self._coerce(ty, self.env[name], node) if name in self.env else ty
+            self.env[name] = target; node.ref_types.append(target)
+        node.type = value_ty
 
     def visit_StoreIndex(self, node):
         array_ty = self.visit(node.value)
@@ -106,6 +120,13 @@ class TypeInferencer:
 
     def visit_Index(self, node):
         value_ty = self.visit(node.value)
+        if is_tuple(value_ty):
+            if len(node.indices) != 1: raise InferError('tuple expects one index', node)
+            index = core.integer_constant_value(node.indices[0])
+            if index is None: raise InferError('tuple index must be a compile-time integer', node.indices[0])
+            if index < 0: index += len(value_ty.elements)
+            if not 0 <= index < len(value_ty.elements): raise InferError('tuple index out of range', node.indices[0])
+            node.tuple_index = index; node.type = value_ty.elements[index]; return node.type
         if is_string(value_ty):
             if len(node.indices) != 1: raise InferError('string expects one index', node)
             index = node.indices[0]
@@ -160,6 +181,8 @@ class TypeInferencer:
             left, right = self.visit(node.args[0]), self.visit(node.args[1])
             if is_string(left) and is_string(right):
                 node.operand_type = node.type = str_t; return str_t
+            if is_tuple(left) and left == right:
+                node.operand_type = node.type = left; return left
             common = promote_numeric(left, right)
             if common is None: raise InferError(f'{node.fn} operands need a common scalar type', node)
             node.operand_type, node.type = common, common; return common
@@ -224,8 +247,8 @@ class TypeInferencer:
     def visit_CallFunc(self, node):
         arg_types = [self.visit(arg) for arg in node.args]
         if node.fn.id == 'len':
-            if len(arg_types) != 1 or not (is_string(arg_types[0]) or is_array(arg_types[0])):
-                raise InferError('len expects one string or array argument', node)
+            if len(arg_types) != 1 or not (is_string(arg_types[0]) or is_array(arg_types[0]) or is_tuple(arg_types[0])):
+                raise InferError('len expects one string, tuple, or array argument', node)
             node.type = int64_t; return int64_t
         if node.fn.id == 'abs':
             if len(arg_types) != 1 or not is_numeric(arg_types[0]):

@@ -56,6 +56,7 @@ Pyjiting 在函数首次被调用时将其 JIT 编译为原生机器码。被 `@
 | 算术 | `+ - * / // % **`、一元 `-`、符合 Python 规范的 floor/mod 符号语义、常量整数幂、适配 NaN 的标量真值判定 | `tests/test_arith.py` |
 | 控制流 | `if`、`while`、`for in range(...)`、一维数组/字符串迭代、`break`、`continue`、循环 `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 字符串 | Unicode 值、比较/成员判断、完整切片、拼接/重复、大小写/去空白/替换、字符谓词、搜索及 `ord`/`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
+| Tuple | 固定长度异构字面量/参数/返回值、嵌套、注解、常量索引、`len`、真值及定长名称解包 | `tests/test_tuple_phase4.py` |
 | 数组 | 四种数值 dtype；安全索引、多维 Strided 读写、一维迭代及 `sum`/`any`/`all` 归约 | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
 | 内建函数 | 标量/字符串内建函数，以及原生 `math` 三角、开方、指数、对数、分类与常量 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
 | 常量 | 在应用 `@jit` 时捕获不可变的标量/字符串全局及闭包值 | `tests/test_numeric_phase3.py` |
@@ -74,6 +75,8 @@ Pyjiting 采用定宽的 Int32/Int64，而非 Python 原生的任意精度大整
 不可变的数值/字符串全局与闭包值会在应用 `@jit` 时冻结为 Core 字面量。原生 `math` 支持 `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮点分类及常量；domain/range 异常沿 JIT 错误 ABI 传播。
 
 字符串采用带长度的 UTF-32 ABI，可正确处理 Unicode 码点和内嵌 NUL。临时值与返回值由单次调用 arena 管理。切片支持省略、正数、负数和动态非零步长；成员判断、Unicode 大小写转换、去空白、替换、字符谓词及 `ord`/`chr` 在静态子集内遵循 Python 语义。
+
+Tuple 是不可变的固定长度结构类型，元素类型会进入特化签名和名称修饰。原生值通过指向形状专属结构的指针传递，并由单次调用 arena 保活，从而避开平台相关的聚合返回 ABI；Python 与 JIT-to-JIT 边界支持嵌套数值/字符串 tuple。
 
 每个特化版本均使用由 Python 函数本体（Identity）及其类型签名派生出的独立 LLVM 符号。因此，即使存在同名的不同函数，也不会发生错误的本地缓存共享。
 
@@ -274,7 +277,7 @@ pyjiting/
 * 整数幂运算（`**`）的指数必须为编译期常量（因动态负指数无法推导确定单一的静态返回类型）。
 * 使用 `@reg` 注册的回调函数必须提供完整的标量或字符串类型注解，且不能跨边界抛出异常。
 * 不支持默认参数、仅限关键字参数、可变长参数（`*args`, `**kwargs`）及关键字实参调用。调用实参数量必须与声明的形参严格匹配。
-* 暂不支持可变全局、内置容器、解包赋值、任意 Python 对象、多维数组归约/迭代、归约 axis 及整组 NumPy 矢量化操作。
+* 暂不支持可变全局、List/Dict、星号或嵌套解包目标、动态 tuple 索引、tuple 修改/比较/迭代、任意 Python 对象、多维数组归约/迭代、axis 及整组 NumPy 矢量化操作。
 
 # 特别致谢
 

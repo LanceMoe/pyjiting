@@ -1,7 +1,7 @@
 from collections import deque
 
 from .errors import InferError, InfiniteType
-from .types import BaseType, CoreType, FuncType, GenericType, VarType, ftv
+from .types import BaseType, CoreType, FuncType, GenericType, TupleType, VarType, ftv
 
 '''
 Lang utils and constraint solver
@@ -21,6 +21,8 @@ def apply(s: dict, t: CoreType) -> CoreType:
         args = [apply(s, a) for a in t.args]
         return_type = apply(s, t.return_type)
         return FuncType(args=args, return_type=return_type)
+    elif isinstance(t, TupleType):
+        return TupleType([apply(s, element) for element in t.elements])
     elif isinstance(t, VarType):
         return s.get(t.s, t)
 
@@ -34,6 +36,9 @@ def unify(x: CoreType, y: CoreType) -> dict:
         s1 = unify(x.a, y.a)
         s2 = unify(apply(s1, x.b), apply(s1, y.b))
         return compose(s2, s1)
+    elif isinstance(x, TupleType) and isinstance(y, TupleType):
+        if len(x.elements) != len(y.elements): raise InferError(x, y)
+        return solve(list(zip(x.elements, y.elements)))
     elif isinstance(x, BaseType) and isinstance(y, BaseType) and (x == y):
         return empty()
     elif isinstance(x, FuncType) and isinstance(y, FuncType):

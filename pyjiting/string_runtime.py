@@ -15,6 +15,7 @@ StringPointer = ctypes.POINTER(StringDescriptor)
 _state = threading.local()
 _callbacks = {}
 _literals = {}
+_allocator = None
 
 
 def begin_call():
@@ -33,6 +34,24 @@ def _arena():
     if not arenas:
         raise RuntimeError('string value created outside a JIT dispatch')
     return arenas[-1]
+
+
+def keep_alive(*values):
+    _arena().extend(values)
+
+
+def allocation_address():
+    global _allocator
+    if _allocator is None:
+        callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int64)
+
+        @callback_type
+        def allocate(size):
+            buffer = ctypes.create_string_buffer(max(1, size))
+            keep_alive(buffer)
+            return ctypes.addressof(buffer)
+        _allocator = allocate
+    return ctypes.cast(_allocator, ctypes.c_void_p).value
 
 
 def make_string(value):

@@ -2,12 +2,13 @@ import ast
 import inspect
 import math
 import types
+import typing
 from textwrap import dedent
 
 from . import ast as core
 from .errors import CompileError
 from .intrinsics import MATH_CONSTANTS, MATH_FUNCTIONS, STRING_METHODS
-from .types import bool_t, double64_t, float32_t, int32_t, int64_t, str_t
+from .types import TupleType, bool_t, double64_t, float32_t, int32_t, int64_t, str_t
 
 
 def get_type_hint(annotation):
@@ -27,6 +28,12 @@ def get_type_hint(annotation):
         return bool_t
     if annotation is str:
         return str_t
+    origin = typing.get_origin(annotation)
+    if origin is tuple:
+        args = typing.get_args(annotation)
+        if len(args) == 2 and args[1] is Ellipsis: return None
+        elements = [get_type_hint(arg) for arg in args]
+        return TupleType(elements) if all(element is not None for element in elements) else None
     name = getattr(annotation, '__name__', None)
     if name is not None:
         return {'int32': int32_t, 'int64': int64_t, 'float32': float32_t,
@@ -38,6 +45,11 @@ def get_type_hint(annotation):
     if isinstance(annotation, ast.Attribute):
         return {'int32': int32_t, 'int64': int64_t, 'float32': float32_t,
                 'float64': double64_t, 'bool_': bool_t}.get(annotation.attr)
+    if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name) and annotation.value.id in ('tuple', 'Tuple'):
+        elements = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+        if any(isinstance(element, ast.Constant) and element.value is Ellipsis for element in elements): return None
+        hints = [get_type_hint(element) for element in elements]
+        return TupleType(hints) if all(hint is not None for hint in hints) else None
     return None
 
 
@@ -120,6 +132,7 @@ class ASTVisitor(ast.NodeVisitor):
             return core.LitInt(value, node)
         if isinstance(value, float): return core.LitFloat(value, node)
         if isinstance(value, str): return core.LitStr(value, node)
+        if isinstance(value, tuple): return core.LitTuple([self._literal(item, node) for item in value], node)
         raise CompileError(f'global {getattr(node, "id", "value")!r} is not an immutable supported constant', node)
 
     def visit_Name(self, node):
@@ -130,12 +143,22 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_Constant(self, node):
         return self._literal(node.value, node)
 
+    def visit_Tuple(self, node): return core.LitTuple([self.visit(element) for element in node.elts], node)
+
     def visit_Return(self, node):
         if node.value is None: raise CompileError('bare return is not supported', node)
         return core.Return(self.visit(node.value), node)
 
     def _assign_target(self, target, value, annotation, node):
         if isinstance(target, ast.Name): return core.Assign(target.id, value, annotation, node)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if annotation is not None: raise CompileError('tuple unpacking annotations are not supported', target)
+            refs = []
+            for element in target.elts:
+                if not isinstance(element, ast.Name):
+                    raise CompileError('tuple unpacking targets must be plain names', target)
+                refs.append(element.id)
+            return core.UnpackAssign(refs, value, node)
         if isinstance(target, ast.Subscript):
             base, indices = self._subscript_parts(target)
             return core.StoreIndex(base, indices, value, node)

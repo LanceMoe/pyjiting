@@ -65,7 +65,21 @@ class FuncType(FunctionType):
         return str(self.args) + ' -> ' + str(self.return_type)
 
 
-CoreType = Union[GenericType, BaseType, FuncType, VarType]
+class TupleType(Type):
+    def __init__(self, elements):
+        self.elements = tuple(elements)
+
+    def __eq__(self, other):
+        return isinstance(other, TupleType) and self.elements == other.elements
+
+    def __hash__(self):
+        return hash(('Tuple', self.elements))
+
+    def __str__(self):
+        return 'Tuple[' + ', '.join(map(str, self.elements)) + ']'
+
+
+CoreType = Union[GenericType, BaseType, FuncType, TupleType, VarType]
 
 int32_t = BaseType('Int32')
 int64_t = BaseType('Int64')
@@ -97,6 +111,8 @@ def ftv(x) -> set:
         return ftv(x.a) | ftv(x.b)
     elif isinstance(x, FuncType):
         return reduce(set.union, set(map(ftv, x.args))) | ftv(x.return_type)
+    elif isinstance(x, TupleType):
+        return reduce(set.union, map(ftv, x.elements), set())
     elif isinstance(x, VarType):
         return set([x])
     raise TypeError(f'unsupported core type: {type(x).__name__}')
@@ -104,6 +120,10 @@ def ftv(x) -> set:
 
 def is_array(ty: Union[GenericType, Any]) -> bool:
     return isinstance(ty, GenericType) and ty.a == array_t
+
+
+def is_tuple(ty):
+    return isinstance(ty, TupleType)
 
 
 numeric_types = {bool_t, int32_t, int64_t, float32_t, double64_t}
@@ -128,7 +148,7 @@ def is_string(ty):
 
 
 def is_truthy_type(ty):
-    return is_numeric(ty) or is_string(ty)
+    return is_numeric(ty) or is_string(ty) or is_tuple(ty)
 
 
 def promote_numeric(left, right):

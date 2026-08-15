@@ -32,6 +32,12 @@ class Assign(Node):
         super().__init__(source); self.ref = ref; self.value = value; self.annotation = annotation
 
 
+class UnpackAssign(Node):
+    _fields = ('refs', 'value')
+    def __init__(self, refs, value, source=None):
+        super().__init__(source); self.refs, self.value = refs, value
+
+
 class StoreIndex(Node):
     _fields = ('value', 'indices', 'rhs')
     def __init__(self, value, indices, rhs, source=None):
@@ -112,6 +118,11 @@ class LitBool(Node):
 class LitStr(Node):
     _fields = ('value',)
     def __init__(self, value, source=None): super().__init__(source); self.value = str(value)
+
+
+class LitTuple(Node):
+    _fields = ('elements',)
+    def __init__(self, elements, source=None): super().__init__(source); self.elements = elements
 
 
 class Prim(Node):

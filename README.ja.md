@@ -56,6 +56,7 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 | 演算 | `+ - * / // % **`、単項 `-`、Python 互換の floor/mod 符号規則、定数整数べき乗、NaN を考慮した真理値判定 | `tests/test_arith.py` |
 | 制御フロー | `if`、`while`、`range`、一次元配列／文字列の反復、`break`、`continue`、ループ `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 文字列 | Unicode 値、比較／包含判定、完全なスライス、連結／反復、変換、文字種判定、検索、`ord`／`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
+| Tuple | 固定長の異種リテラル／引数／戻り値、ネスト、注釈、定数添字、`len`、真理値、固定長名前アンパック | `tests/test_tuple_phase4.py` |
 | 配列 | 4 種の数値 dtype、安全な添字、多次元 Strided アクセス、一次元反復、`sum`／`any`／`all` リダクション | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
 | 組み込み関数 | スカラ／文字列関数と、ネイティブ `math` の三角・平方根・指数・対数・分類・定数 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
 | 定数 | `@jit` 適用時に不変スカラ／文字列のグローバルおよびクロージャ値をキャプチャ | `tests/test_numeric_phase3.py` |
@@ -74,6 +75,8 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 不変の数値／文字列グローバルおよびクロージャ値は `@jit` 適用時に Core リテラルとして固定されます。ネイティブ `math` は `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮動小数点分類、標準定数に対応し、domain/range エラーは JIT エラー ABI で伝播します。
 
 文字列は長さ付き UTF-32 ABI を使用し、Unicode コードポイントと埋め込み NUL を保持します。一時値と戻り値は呼び出し単位の arena で管理されます。スライスは省略、正、負、動的な非ゼロ step に対応し、包含判定、Unicode 大小文字変換、空白除去、置換、文字種判定、`ord`／`chr` は静的サブセット内で Python の意味論に従います。
+
+Tuple は不変の固定長構造型で、要素型は特化シグネチャとマングル名に含まれます。ネイティブ値は形状固有構造へのポインタとして渡され、呼び出し単位の arena が保持するため、プラットフォーム依存の集約戻り ABI を回避できます。Python／JIT-to-JIT 境界でネストした数値／文字列 tuple を扱えます。
 
 各特化コードは、デコレートされた Python 関数の識別情報（identity）と型シグネチャから生成される一意の LLVM シンボルを使用します。そのため、同じ関数名を持つ別々の関数が誤ってキャッシュを共有してしまうことはありません。
 
@@ -274,7 +277,7 @@ pyjiting/
 * 整数のべき乗（`**`）は、指数部がコンパイル時定数である必要があります（動的な負の指数は静的に戻り型を一意に決定できないため）。
 * `@reg` 関数はサポート対象のスカラ型または文字列型アノテーションを完全に備える必要があり、コールバック境界を跨いで例外を投げることはできません。
 * デフォルト引数、キーワード専用引数、可変長引数（`*args`, `**kwargs`）、キーワード引数による呼び出しはサポートしていません。JIT 関数の呼び出しは、宣言された位置引数の数と厳密に一致する必要があります。
-* 可変グローバル、組み込みコンテナ、アンパック代入、任意の Python オブジェクト、多次元配列のリダクション／反復、axis、NumPy 配列全体のベクトル演算は未対応です。
+* 可変グローバル、List／Dict、starred／ネストしたアンパック対象、動的 tuple 添字、tuple の変更／比較／反復、任意の Python オブジェクト、多次元配列リダクション／反復、axis、NumPy 配列全体の演算は未対応です。
 
 # 謝辞
 
