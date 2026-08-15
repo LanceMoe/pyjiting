@@ -3,7 +3,8 @@ import subprocess
 import sys
 
 from pyjiting import jit
-from pyjiting.main import function_cache
+from pyjiting.main import ensure_compilation_unit, function_cache
+from pyjiting.parser import ASTVisitor
 
 
 def test_same_signature_is_compiled_once():
@@ -72,3 +73,20 @@ def test_mangler_is_stable_across_hash_seeds():
         env['PYTHONHASHSEED'] = seed
         outputs.append(subprocess.check_output([sys.executable, '-c', code], env=env, text=True).strip())
     assert outputs[0] == outputs[1] == 'sample__i64_f64'
+
+
+def test_semantic_fingerprint_does_not_depend_on_cpython_ast_dump(monkeypatch):
+    tree = ASTVisitor()('''
+        def add_one(value):
+            if value:
+                return value + 1
+            return 0
+    ''')
+
+    def dump_is_unavailable(*args, **kwargs):
+        raise AssertionError('Core AST fingerprinting must not call ast.dump')
+
+    monkeypatch.setattr('pyjiting.main.py_ast.dump', dump_is_unavailable)
+    ensure_compilation_unit(tree)
+
+    assert len(tree.semantic_fingerprint) == 64

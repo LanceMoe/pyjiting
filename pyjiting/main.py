@@ -80,6 +80,21 @@ def typeinfer(tree, arg_types, registry=None, jit_resolver=None, reg_resolver=No
     return TypeInferencer(arg_types, registry or signatures(), jit_resolver, reg_resolver).visit(tree)
 
 
+def _fingerprint_value(value):
+    """Serialize Core AST fields without depending on CPython's ``ast.dump``."""
+    if isinstance(value, py_ast.AST):
+        fields = getattr(value, '_fields', ())
+        serialized_fields = ','.join(
+            f'{name}={_fingerprint_value(getattr(value, name, None))}'
+            for name in fields)
+        return f'{type(value).__module__}.{type(value).__qualname__}({serialized_fields})'
+    if isinstance(value, list):
+        return '[' + ','.join(_fingerprint_value(item) for item in value) + ']'
+    if isinstance(value, tuple):
+        return '(' + ','.join(_fingerprint_value(item) for item in value) + ')'
+    return f'{type(value).__module__}.{type(value).__qualname__}:{value!r}'
+
+
 def ensure_compilation_unit(tree):
     """Assign a process-unique identity to one decorated/parsed function tree."""
     unit_id = getattr(tree, 'compilation_unit_id', None)
@@ -90,7 +105,7 @@ def ensure_compilation_unit(tree):
         if unit_id is None:
             unit_id = next(compilation_unit_ids)
             tree.compilation_unit_id = unit_id
-            fingerprint_source = py_ast.dump(tree, include_attributes=False)
+            fingerprint_source = _fingerprint_value(tree)
             tree.semantic_fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()
             base_symbol = getattr(tree, 'symbol', tree.fname)
             tree.symbol = f'{base_symbol}_{tree.semantic_fingerprint[:12]}_u{unit_id:x}'
