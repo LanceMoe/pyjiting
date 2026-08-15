@@ -126,6 +126,11 @@ def is_tuple(ty):
     return isinstance(ty, TupleType)
 
 
+def contains_array(ty):
+    """Return whether a type contains an ndarray at any structural depth."""
+    return is_array(ty) or (is_tuple(ty) and any(contains_array(element) for element in ty.elements))
+
+
 numeric_types = {bool_t, int32_t, int64_t, float32_t, double64_t}
 integer_types = {bool_t, int32_t, int64_t}
 float_types = {float32_t, double64_t}

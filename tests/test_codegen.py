@@ -1,4 +1,4 @@
-from pyjiting.types import double64_t, int64_t, make_array_type
+from pyjiting.types import double64_t, int64_t, make_array_type, str_t
 from conftest import verified_module
 
 
@@ -26,4 +26,18 @@ def test_generated_array_module_verifies_for_strided_multidimensional_access():
 
     ir_text = str(module)
     assert 'pyjiting.ndarray.double' in ir_text
-    assert 'getelementptr i64, i64*' in ir_text
+    assert 'getelementptr i8, i8*' in ir_text
+    assert 'align 1' in ir_text
+
+
+def test_string_index_and_iteration_load_utf32_codepoints_in_native_ir():
+    module = verified_module('''
+        def first(value):
+            for character in value:
+                return character
+            return ''
+    ''', [str_t])
+
+    ir_text = str(module)
+    assert 'getelementptr i32, i32*' in ir_text
+    assert 'foreach_body' in ir_text

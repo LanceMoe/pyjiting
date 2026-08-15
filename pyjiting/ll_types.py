@@ -7,7 +7,8 @@ import numpy as np
 from llvmlite import ir
 
 from .string_runtime import (StringDescriptor, StringPointer, begin_call, end_call,
-                             keep_alive, make_string, to_python)
+                             keep_alive, make_string, take_pending_exception,
+                             to_python)
 
 
 ERROR_DIVISION_BY_ZERO = 1
@@ -19,6 +20,13 @@ ERROR_ORD_LENGTH = 6
 ERROR_CHR_RANGE = 7
 ERROR_MATH_DOMAIN = 8
 ERROR_MATH_RANGE = 9
+ERROR_ARRAY_READONLY = 10
+ERROR_PYTHON_CALLBACK = 11
+
+ARRAY_WRITEABLE = 1 << 0
+ARRAY_ALIGNED = 1 << 1
+ARRAY_C_CONTIGUOUS = 1 << 2
+ARRAY_F_CONTIGUOUS = 1 << 3
 
 
 _scalar_ctypes = {1: ctypes.c_int8, 8: ctypes.c_int8, 16: ctypes.c_int16, 32: ctypes.c_int32, 64: ctypes.c_int64}
@@ -54,8 +62,18 @@ def wrap_type(llvm_type) -> Any:
         if llvm_type.name == 'pyjiting.string': return StringDescriptor
         cached = getattr(llvm_type, '_pyjiting_ctype', None)
         if cached is not None: return cached
-        fields = [('data', wrap_type(llvm_type.elements[0])), ('ndim', ctypes.c_int64), ('shape', ctypes.POINTER(ctypes.c_int64)), ('strides', ctypes.POINTER(ctypes.c_int64))]
-        ctype = type(llvm_type.name.replace('.', '_'), (ctypes.Structure,), {'_fields_': fields})
+        fields = [
+            ('data', wrap_type(llvm_type.elements[0])),
+            ('ndim', ctypes.c_int64),
+            ('shape', ctypes.POINTER(ctypes.c_int64)),
+            ('strides', ctypes.POINTER(ctypes.c_int64)),
+            ('itemsize', ctypes.c_int64),
+            ('flags', ctypes.c_int64),
+        ]
+        ctype = type(llvm_type.name.replace('.', '_'), (ctypes.Structure,), {
+            '_fields_': fields,
+            '_pyjiting_array': True,
+        })
         setattr(llvm_type, '_pyjiting_ctype', ctype)
         return ctype
     raise RuntimeError(f'Unknown LLVM type {llvm_type}')
@@ -64,16 +82,21 @@ def wrap_type(llvm_type) -> Any:
 def wrap_ndarray(value):
     dtype = np.dtype(value.dtype)
     if dtype not in _numpy_ctypes: raise TypeError(f'unsupported ndarray dtype {dtype}')
-    data = value.ctypes.data_as(ctypes.POINTER(_numpy_ctypes[dtype]))
+    data = ctypes.cast(value.ctypes.data, ctypes.POINTER(ctypes.c_int8))
     shape = (ctypes.c_int64 * value.ndim)(*value.shape)
-    strides = (ctypes.c_int64 * value.ndim)(*(stride // value.dtype.itemsize for stride in value.strides))
-    return data, value.ndim, shape, strides
+    strides = (ctypes.c_int64 * value.ndim)(*value.strides)
+    flags = 0
+    if value.flags.writeable: flags |= ARRAY_WRITEABLE
+    if value.flags.aligned: flags |= ARRAY_ALIGNED
+    if value.flags.c_contiguous: flags |= ARRAY_C_CONTIGUOUS
+    if value.flags.f_contiguous: flags |= ARRAY_F_CONTIGUOUS
+    return data, value.ndim, shape, strides, value.dtype.itemsize, flags
 
 
 def wrap_arg(arg, value):
     if isinstance(value, np.ndarray):
-        data, ndim, shape, strides = wrap_ndarray(value)
-        return arg._type_(data, ndim, shape, strides)
+        data, ndim, shape, strides, itemsize, flags = wrap_ndarray(value)
+        return arg._type_(data, ndim, shape, strides, itemsize, flags)
     if isinstance(value, str): return make_string(value)
     if isinstance(value, tuple): return wrap_tuple(arg, value)
     return value
@@ -131,10 +154,19 @@ def dispatcher(fn, user_arg_count):
             if error.value == ERROR_CHR_RANGE: raise ValueError('chr() arg not in range(0x110000)')
             if error.value == ERROR_MATH_DOMAIN: raise ValueError('math domain error')
             if error.value == ERROR_MATH_RANGE: raise OverflowError('math range error')
+            if error.value == ERROR_ARRAY_READONLY: raise ValueError('assignment destination is read-only')
+            if error.value == ERROR_PYTHON_CALLBACK:
+                pending = take_pending_exception()
+                if pending is None:
+                    raise RuntimeError('registered callback failed without a Python exception')
+                raise pending
             if fn._restype_ == StringPointer: return to_python(result)
             if (isinstance(fn._restype_, type) and issubclass(fn._restype_, ctypes._Pointer) and
                     getattr(fn._restype_._type_, '_pyjiting_tuple', False)):
                 return unwrap_tuple(result)
+            if (isinstance(fn._restype_, type) and issubclass(fn._restype_, ctypes._Pointer) and
+                    getattr(fn._restype_._type_, '_pyjiting_array', False)):
+                raise RuntimeError('internal ndarray descriptors cannot cross the Python return boundary')
             return result
         finally:
             end_call()

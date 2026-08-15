@@ -52,3 +52,25 @@ def test_multidimensional_write_updates_a_transposed_view():
 def test_float_array_augmented_negative_power_uses_float_result():
     values = np.array([2.0], dtype=np.float64)
     assert negative_power_store(values, 0) == pytest.approx(0.25)
+
+
+def test_readonly_array_store_raises_without_mutation():
+    values = np.zeros((2, 3), dtype=np.float32)
+    values.flags.writeable = False
+
+    with pytest.raises(ValueError, match='assignment destination is read-only'):
+        write_2d(values, 0, 0, np.float32(7.0))
+
+    np.testing.assert_array_equal(values, np.zeros((2, 3), dtype=np.float32))
+
+
+def test_byte_strides_and_unaligned_views_match_numpy():
+    base = np.arange(4, dtype=np.int64)
+    byte_strided = np.lib.stride_tricks.as_strided(base, shape=(2, 2), strides=(8, 1))
+    assert read_2d(byte_strided, 0, 1) == byte_strided[0, 1]
+
+    buffer = bytearray(17)
+    unaligned = np.ndarray((2,), dtype=np.int64, buffer=buffer, offset=1)
+    unaligned[:] = [123, 456]
+    assert not unaligned.flags.aligned
+    assert read_2d(unaligned.reshape(1, 2), 0, 1) == 456

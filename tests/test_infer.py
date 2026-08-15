@@ -46,3 +46,26 @@ def test_array_annotation_is_specialized_from_the_call():
 
     assert tree.args[0].type == make_array_type(float32_t)
     assert signature.return_type == float32_t
+
+
+def test_array_return_is_rejected_at_inference():
+    with pytest.raises(InferError, match='ndarray return values are not supported'):
+        infer_function('''
+            def identity(values):
+                return values
+        ''', [make_array_type(int64_t)])
+
+
+def test_numeric_branch_assignments_and_returns_join_to_a_common_type():
+    tree, signature = infer_function('''
+        def choose(flag):
+            if flag:
+                result = 1
+            else:
+                result = 2.5
+            return result
+    ''', [bool_t])
+
+    assert signature.return_type == double64_t
+    assert tree.body[0].body[0].type == double64_t
+    assert tree.body[0].orelse[0].type == double64_t

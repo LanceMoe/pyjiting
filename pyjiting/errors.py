@@ -17,3 +17,7 @@ class InfiniteType(InferError):
 
 class CodegenError(CompileError):
     """Raised when a typed program cannot be lowered to LLVM IR."""
+
+
+class SpecializationLimitError(CompileError):
+    """Raised when one decorated function exceeds its configured specialization limit."""

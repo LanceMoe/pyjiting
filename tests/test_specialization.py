@@ -42,6 +42,24 @@ def test_same_named_functions_from_different_scopes_do_not_share_machine_code():
     assert len(function_cache) == before + 2
 
 
+def closure_factory(offset):
+    @jit
+    def add_offset(value):
+        return value + offset
+    return add_offset
+
+
+def test_factory_closures_have_isolated_compilation_units_and_machine_code():
+    first = closure_factory(1)
+    second = closure_factory(2)
+
+    assert first(10) == 11
+    assert second(10) == 12
+    assert first.__pyjiting_tree__.compilation_unit_id != second.__pyjiting_tree__.compilation_unit_id
+    assert first.__pyjiting_tree__.symbol != second.__pyjiting_tree__.symbol
+    assert first.__pyjiting_tree__.semantic_fingerprint != second.__pyjiting_tree__.semantic_fingerprint
+
+
 def test_mangler_is_stable_across_hash_seeds():
     code = (
         'from pyjiting.ll_types import mangler; '

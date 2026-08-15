@@ -47,6 +47,21 @@ def negative_dynamic_range(start, step):
     return total
 
 
+@jit
+def constant_loop_return() -> int:
+    while True:
+        return 7
+
+
+@jit
+def numeric_branch_join(flag):
+    if flag:
+        result = 1
+    else:
+        result = 2.5
+    return result
+
+
 def python_nested_loop_else(limit):
     total = 0
     for outer in range(limit):
@@ -76,3 +91,9 @@ def test_dynamic_negative_range_matches_python():
 def test_recursive_runtime_errors_propagate_to_the_dispatcher():
     with pytest.raises(ZeroDivisionError, match='division by zero'):
         recursive_division_error(3)
+
+
+def test_constant_true_loop_and_numeric_branch_join():
+    assert constant_loop_return() == 7
+    assert numeric_branch_join(True) == 1.0
+    assert numeric_branch_join(False) == 2.5

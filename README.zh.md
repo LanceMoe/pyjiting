@@ -69,7 +69,7 @@ Pyjiting 采用定宽的 Int32/Int64，而非 Python 原生的任意精度大整
 
 整数运算严格遵循二进制补码的定宽语义。特别地，最小有符号负数除以 `-1` 时不会自动提升精度，而是直接发生溢出并保留为最小有符号负数。
 
-数组采用稳定的 `data/ndim/shape/strides` ABI。元素和 shape 索引支持负数并进行边界检查，越界抛出 `IndexError`；索引维度数不匹配则抛出 `ValueError`。数组创建、广播及整组 ufunc 运算仍不支持。
+数组使用 descriptor v2 ABI：`data`、`ndim`、`shape`、以字节表示的 `strides`、`itemsize` 以及 NumPy flags。元素和 shape 索引支持负数并进行边界检查，支持转置、切片、负 stride、字节 stride 以及未对齐 view；读写使用对齐安全的访问。向只读数组实际写入会抛出 `ValueError("assignment destination is read-only")`；越界抛出 `IndexError`，索引维度数不匹配则抛出 `ValueError`。数组创建、广播、数组返回及整组 ufunc 运算仍不支持。
 一维 Strided 数组支持原生 `sum`、`any` 和 `all`；int32/float32 求和提升为 int64/float64，空数组身份值与 Python 一致。
 
 不可变的数值/字符串全局与闭包值会在应用 `@jit` 时冻结为 Core 字面量。原生 `math` 支持 `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮点分类及常量；domain/range 异常沿 JIT 错误 ABI 传播。
@@ -148,7 +148,7 @@ print(test(11.4, 51.4))  # 62.8  (double/float64 特化)
 ### `@jit` 与 `@reg` 装饰器
 
 * **`@jit`**：将函数标记为 JIT 编译目标。源码在函数定义时完成 AST 解析，并在首次调用时根据参数类型签名完成特化并编译为原生代码。适用于计算密集、循环或递归繁重的高频逻辑。
-* **`@reg`**：将普通 Python 函数注册为可供 JIT 代码调用的回调函数（Callback）。该函数本身不会被 Pyjiting 编译，而是在原生执行期间跨越 ctypes 边界回调原 Python 函数。适用于日志记录、结果打印或与现有纯 Python 库集成。注册的函数**必须提供完整的标量类型注解**（`int`、`float`、`bool`、`np.int32`、`np.int64`、`np.float32`、`np.float64`），且不允许跨回调边界抛出未捕获的异常。
+* **`@reg`**：将普通 Python 函数注册为可供 JIT 代码调用的回调函数（Callback）。该函数本身不会被 Pyjiting 编译，而是在原生执行期间跨越 ctypes 边界回调原 Python 函数。适用于日志记录、结果打印或与现有纯 Python 库集成。注册函数必须提供完整的标量或字符串类型注解（`int`、`float`、`bool`、`str`、`np.int32`、`np.int64`、`np.float32`、`np.float64`）；同名回调会按具体 callable 隔离。回调异常会由 dispatch frame 捕获并在最外层 Python 调用点重新抛出，原生用户逻辑不会使用占位返回值继续执行。
 
 | 装饰器 | 作用 | 运行方式 | 适用场景 |
 | --- | --- | --- | --- |
@@ -275,7 +275,7 @@ pyjiting/
 * 运行时除以零将抛出 `ZeroDivisionError`；动态步长为 `0` 的 `range` 将通过 JIT 错误 ABI 抛出 `ValueError`。
 * 带有非 `None` 声明的 JIT 函数必须在所有控制流分支上均显式返回值（Return）。
 * 整数幂运算（`**`）的指数必须为编译期常量（因动态负指数无法推导确定单一的静态返回类型）。
-* 使用 `@reg` 注册的回调函数必须提供完整的标量或字符串类型注解，且不能跨边界抛出异常。
+* 使用 `@reg` 注册的回调函数必须提供完整的标量或字符串类型注解。回调异常会在最外层 Python 调用点重新抛出，而不会跨越 ctypes ABI。
 * 不支持默认参数、仅限关键字参数、可变长参数（`*args`, `**kwargs`）及关键字实参调用。调用实参数量必须与声明的形参严格匹配。
 * 暂不支持可变全局、List/Dict、星号或嵌套解包目标、动态 tuple 索引、tuple 修改/比较/迭代、任意 Python 对象、多维数组归约/迭代、axis 及整组 NumPy 矢量化操作。
 

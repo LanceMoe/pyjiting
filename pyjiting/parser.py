@@ -8,7 +8,8 @@ from textwrap import dedent
 from . import ast as core
 from .errors import CompileError
 from .intrinsics import MATH_CONSTANTS, MATH_FUNCTIONS, STRING_METHODS
-from .types import TupleType, bool_t, double64_t, float32_t, int32_t, int64_t, str_t
+from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
+                    str_t, void_t)
 
 
 def get_type_hint(annotation):
@@ -28,6 +29,8 @@ def get_type_hint(annotation):
         return bool_t
     if annotation is str:
         return str_t
+    if annotation is type(None):
+        return void_t
     origin = typing.get_origin(annotation)
     if origin is tuple:
         args = typing.get_args(annotation)
@@ -41,7 +44,9 @@ def get_type_hint(annotation):
     if isinstance(annotation, ast.Name):
         return {'int': int64_t, 'int64': int64_t, 'int32': int32_t,
                 'float': double64_t, 'float64': double64_t, 'float32': float32_t,
-                'bool': bool_t, 'str': str_t}.get(annotation.id)
+                'bool': bool_t, 'str': str_t, 'None': void_t}.get(annotation.id)
+    if isinstance(annotation, ast.Constant) and annotation.value is None:
+        return void_t
     if isinstance(annotation, ast.Attribute):
         return {'int32': int32_t, 'int64': int64_t, 'float32': float32_t,
                 'float64': double64_t, 'bool_': bool_t}.get(annotation.attr)
@@ -69,6 +74,7 @@ class ASTVisitor(ast.NodeVisitor):
     def __call__(self, source):
         self._evaluated_annotations = {}
         self._constants = {}
+        self._bindings = {}
         self._local_names = set()
         self._loop_depth = 0
         if isinstance(source, (types.FunctionType, types.LambdaType, types.ModuleType)):
@@ -81,7 +87,14 @@ class ASTVisitor(ast.NodeVisitor):
                     self._evaluated_annotations = {}
                 closure = inspect.getclosurevars(source)
                 self._constants = {**closure.globals, **closure.nonlocals}
-            source = dedent(inspect.getsource(source))
+                self._bindings = {**closure.globals, **closure.nonlocals}
+            try:
+                source = dedent(inspect.getsource(source))
+            except (OSError, TypeError) as error:
+                name = getattr(source, '__qualname__', repr(source))
+                raise CompileError(
+                    f'cannot retrieve source for {name!r}; use jit.from_source(...) '
+                    'for dynamic functions') from error
         elif isinstance(source, str):
             source = dedent(source)
         else:
@@ -104,15 +117,21 @@ class ASTVisitor(ast.NodeVisitor):
                 self._local_names.add(item.id)
         for arg in [*node.args.posonlyargs, *node.args.args]:
             annotation = self._evaluated_annotations.get(arg.arg, arg.annotation)
+            if arg.annotation is not None and annotation is None:
+                annotation = type(None)
             hint = get_type_hint(annotation)
             if arg.annotation is not None and hint is None and not is_dynamic_array_annotation(annotation):
                 raise CompileError(f'unsupported annotation for {arg.arg}', arg.annotation)
             args.append(core.Var(arg.arg, hint, arg))
         return_annotation = self._evaluated_annotations.get('return', node.returns)
+        if node.returns is not None and return_annotation is None:
+            return_annotation = type(None)
         hint = get_type_hint(return_annotation)
         if node.returns is not None and hint is None:
             raise CompileError('unsupported return annotation', node.returns)
-        return core.Fun(node.name, args, [self.visit(stmt) for stmt in node.body], hint, node)
+        function = core.Fun(node.name, args, [self.visit(stmt) for stmt in node.body], hint, node)
+        function.bindings = self._bindings.copy()
+        return function
 
     def _literal(self, value, node):
         try:
@@ -146,7 +165,8 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_Tuple(self, node): return core.LitTuple([self.visit(element) for element in node.elts], node)
 
     def visit_Return(self, node):
-        if node.value is None: raise CompileError('bare return is not supported', node)
+        if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
+            return core.Return(None, node)
         return core.Return(self.visit(node.value), node)
 
     def _assign_target(self, target, value, annotation, node):

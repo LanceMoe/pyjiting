@@ -16,7 +16,7 @@ class Node(ast.AST):
         cloned = type(self).__new__(type(self))
         memo[id(self)] = cloned
         for name, value in self.__dict__.items():
-            setattr(cloned, name, value if name == 'namespace' else copy.deepcopy(value, memo))
+            setattr(cloned, name, value if name in ('namespace', 'bindings') else copy.deepcopy(value, memo))
         return cloned
 
 
@@ -36,6 +36,7 @@ class UnpackAssign(Node):
     _fields = ('refs', 'value')
     def __init__(self, refs, value, source=None):
         super().__init__(source); self.refs, self.value = refs, value
+        self.source_types, self.ref_types = [], []
 
 
 class StoreIndex(Node):
@@ -92,6 +93,7 @@ class Fun(Node):
     def __init__(self, fname, args, body, return_annotation=None, source=None):
         super().__init__(); self.fname, self.args, self.body, self.return_annotation = fname, args, body, return_annotation
         self.symbol = fname
+        self.bindings = {}
         if source is not None:
             for name in ('lineno', 'col_offset', 'end_lineno', 'end_col_offset'):
                 if hasattr(source, name):

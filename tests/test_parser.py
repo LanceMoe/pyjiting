@@ -77,3 +77,14 @@ def test_parser_rejects_unknown_annotations_with_a_location():
 def test_parser_rejects_parameter_and_call_forms_outside_the_subset(source, message):
     with pytest.raises(CompileError, match=message):
         ASTVisitor()(source)
+
+
+def test_none_return_annotation_and_bare_return_are_supported():
+    tree = ASTVisitor()('''
+        def stop(value: int) -> None:
+            if value:
+                return
+    ''')
+
+    assert str(tree.return_annotation) == 'Void'
+    assert tree.body[0].body[0].value is None

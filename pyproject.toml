@@ -1,13 +1,31 @@
 [project]
 name = "pyjiting"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small typed Python subset JIT compiler built with llvmlite"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    { name = "LanceMoe" },
+]
+keywords = ["jit", "llvm", "compiler", "numpy", "python"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Compilers",
+]
 dependencies = [
     "llvmlite>=0.49.0",
     "numpy>=2.5.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/LanceMoe/pyjiting"
+Repository = "https://github.com/LanceMoe/pyjiting"
+Issues = "https://github.com/LanceMoe/pyjiting/issues"
 
 [project.optional-dependencies]
 dev = [

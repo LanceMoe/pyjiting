@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install locked development environment
+        run: uv sync --extra dev --python ${{ matrix.python }}
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python }} pytest -q
+
+      - name: Run Pyright
+        run: uv run --python ${{ matrix.python }} pyright
+
+      - name: Build source and wheel distributions
+        shell: pwsh
+        run: |
+          $dist = Join-Path $PWD 'dist'
+          if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
+          uv build
+
+      - name: Smoke-test the built wheel
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem dist -Filter 'pyjiting-*.whl' | Select-Object -First 1 -ExpandProperty FullName)
+          if (-not $wheel) { throw 'Wheel artifact not found' }
+          uv pip install --python .venv --force-reinstall $wheel
+          uv run --no-sync python -I -c "from pyjiting import jit; import pyjiting; assert pyjiting.__version__ == '0.2.0'; assert jit.from_source('def increment(value):\n    return value + 1')(41) == 42"

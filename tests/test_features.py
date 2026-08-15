@@ -183,7 +183,7 @@ def test_annotations_callbacks_and_mangler():
 
 def test_parser_reports_unsupported_constant_and_location():
     with pytest.raises(CompileError, match='line'):
-        ASTVisitor()('def unsupported():\n    return None')
+        ASTVisitor()('def unsupported():\n    return [1]')
 
 
 def test_integer_power_rejects_dynamic_exponent():

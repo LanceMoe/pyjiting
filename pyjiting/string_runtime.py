@@ -11,6 +11,8 @@ StringDescriptor._fields_ = [
     ('length', ctypes.c_int64),
 ]
 StringPointer = ctypes.POINTER(StringDescriptor)
+ErrorPointer = ctypes.POINTER(ctypes.c_int32)
+ERROR_PYTHON_CALLBACK = 11
 
 _state = threading.local()
 _callbacks = {}
@@ -23,10 +25,36 @@ def begin_call():
     if stack is None:
         stack = _state.arenas = []
     stack.append([])
+    pending = getattr(_state, 'pending_exceptions', None)
+    if pending is None:
+        pending = _state.pending_exceptions = []
+    pending.append(None)
 
 
 def end_call():
+    _state.pending_exceptions.pop()
     _state.arenas.pop()
+
+
+def set_pending_exception(exception):
+    pending = getattr(_state, 'pending_exceptions', None)
+    if not pending:
+        raise RuntimeError('callback exception created outside a JIT dispatch')
+    pending[-1] = exception
+
+
+def take_pending_exception():
+    pending = getattr(_state, 'pending_exceptions', None)
+    if not pending:
+        return None
+    exception = pending[-1]
+    pending[-1] = None
+    return exception
+
+
+def _callback_failed(error, exception):
+    set_pending_exception(exception)
+    error[0] = ERROR_PYTHON_CALLBACK
 
 
 def _arena():
@@ -43,13 +71,17 @@ def keep_alive(*values):
 def allocation_address():
     global _allocator
     if _allocator is None:
-        callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int64)
+        callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_int64, ErrorPointer)
 
         @callback_type
-        def allocate(size):
-            buffer = ctypes.create_string_buffer(max(1, size))
-            keep_alive(buffer)
-            return ctypes.addressof(buffer)
+        def allocate(size, error):
+            try:
+                buffer = ctypes.create_string_buffer(max(1, size))
+                keep_alive(buffer)
+                return ctypes.addressof(buffer)
+            except BaseException as exception:
+                _callback_failed(error, exception)
+                return None
         _allocator = allocate
     return ctypes.cast(_allocator, ctypes.c_void_p).value
 
@@ -82,57 +114,83 @@ def to_python(pointer):
 
 
 def _binary_string(fn):
-    callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, StringPointer, StringPointer)
+    callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, StringPointer, StringPointer, ErrorPointer)
 
     @callback_type
-    def callback(left, right):
-        return ctypes.cast(make_string(fn(to_python(left), to_python(right))), ctypes.c_void_p).value
+    def callback(left, right, error):
+        try:
+            return ctypes.cast(make_string(fn(to_python(left), to_python(right))), ctypes.c_void_p).value
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return None
     return callback
 
 
 def _query(fn):
-    callback_type = ctypes.CFUNCTYPE(ctypes.c_int64, StringPointer, StringPointer)
+    callback_type = ctypes.CFUNCTYPE(ctypes.c_int64, StringPointer, StringPointer, ErrorPointer)
 
     @callback_type
-    def callback(left, right):
-        return int(fn(to_python(left), to_python(right)))
+    def callback(left, right, error):
+        try:
+            return int(fn(to_python(left), to_python(right)))
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return 0
     return callback
 
 
 def _unary_string(fn):
-    callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, StringPointer)
+    callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, StringPointer, ErrorPointer)
 
     @callback_type
-    def callback(value):
-        return ctypes.cast(make_string(fn(to_python(value))), ctypes.c_void_p).value
+    def callback(value, error):
+        try:
+            return ctypes.cast(make_string(fn(to_python(value))), ctypes.c_void_p).value
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return None
     return callback
 
 
 def _unary_query(fn):
-    callback_type = ctypes.CFUNCTYPE(ctypes.c_int64, StringPointer)
+    callback_type = ctypes.CFUNCTYPE(ctypes.c_int64, StringPointer, ErrorPointer)
 
     @callback_type
-    def callback(value):
-        return int(fn(to_python(value)))
+    def callback(value, error):
+        try:
+            return int(fn(to_python(value)))
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return 0
     return callback
 
 
 def _replace():
-    callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, StringPointer, StringPointer, StringPointer)
+    callback_type = ctypes.CFUNCTYPE(
+        ctypes.c_void_p, StringPointer, StringPointer, StringPointer, ErrorPointer)
 
     @callback_type
-    def callback(value, old, new):
-        result = to_python(value).replace(to_python(old), to_python(new))
-        return ctypes.cast(make_string(result), ctypes.c_void_p).value
+    def callback(value, old, new, error):
+        try:
+            result = to_python(value).replace(to_python(old), to_python(new))
+            return ctypes.cast(make_string(result), ctypes.c_void_p).value
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return None
     return callback
 
 
 def _repeat():
-    callback_type = ctypes.CFUNCTYPE(ctypes.c_void_p, StringPointer, ctypes.c_int64)
+    callback_type = ctypes.CFUNCTYPE(
+        ctypes.c_void_p, StringPointer, ctypes.c_int64, ErrorPointer)
 
     @callback_type
-    def callback(value, count):
-        return ctypes.cast(make_string(to_python(value) * count), ctypes.c_void_p).value
+    def callback(value, count, error):
+        try:
+            return ctypes.cast(make_string(to_python(value) * count), ctypes.c_void_p).value
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return None
     return callback
 
 
@@ -158,15 +216,19 @@ def _slice():
 
     @callback_type
     def callback(value, has_lower, lower, has_upper, upper, has_step, step, error):
-        start = lower if has_lower else None
-        stop = upper if has_upper else None
-        stride = step if has_step else None
-        if stride == 0:
-            error[0] = 5
-            result = ''
-        else:
-            result = to_python(value)[start:stop:stride]
-        return ctypes.cast(make_string(result), ctypes.c_void_p).value
+        try:
+            start = lower if has_lower else None
+            stop = upper if has_upper else None
+            stride = step if has_step else None
+            if stride == 0:
+                error[0] = 5
+                result = ''
+            else:
+                result = to_python(value)[start:stop:stride]
+            return ctypes.cast(make_string(result), ctypes.c_void_p).value
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return None
     return callback
 
 
@@ -175,11 +237,15 @@ def _ord():
 
     @callback_type
     def callback(value, error):
-        text = to_python(value)
-        if len(text) != 1:
-            error[0] = 6
+        try:
+            text = to_python(value)
+            if len(text) != 1:
+                error[0] = 6
+                return 0
+            return ord(text)
+        except BaseException as exception:
+            _callback_failed(error, exception)
             return 0
-        return ord(text)
     return callback
 
 
@@ -188,12 +254,16 @@ def _chr():
 
     @callback_type
     def callback(value, error):
-        if not 0 <= value <= 0x10FFFF:
-            error[0] = 7
-            result = ''
-        else:
-            result = chr(value)
-        return ctypes.cast(make_string(result), ctypes.c_void_p).value
+        try:
+            if not 0 <= value <= 0x10FFFF:
+                error[0] = 7
+                result = ''
+            else:
+                result = chr(value)
+            return ctypes.cast(make_string(result), ctypes.c_void_p).value
+        except BaseException as exception:
+            _callback_failed(error, exception)
+            return None
     return callback
 
 
@@ -224,3 +294,7 @@ def callback_address(name):
             'chr': _chr(),
         })
     return ctypes.cast(_callbacks[name], ctypes.c_void_p).value
+
+
+def literal_count():
+    return len(_literals)

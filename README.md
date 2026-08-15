@@ -49,7 +49,7 @@ Pyjiting compiles a function to native code when it is first called. A function 
 
 | Area | Supported behavior | Regression coverage |
 |---|---|---|
-| Specialization | Separate native specialization per scalar/array/string signature, deterministic names, isolated LLVM modules, concurrent compilation isolation and native JIT-to-JIT calls | `tests/test_specialization.py`, `tests/test_extensions.py` |
+| Specialization | Separate native specialization per scalar/array/string signature; decoration-instance isolation, deterministic native names, bounded per-function caches, concurrent compilation isolation and native JIT-to-JIT calls | `tests/test_specialization.py`, `tests/test_runtime_state.py`, `tests/test_extensions.py` |
 | Scalars | Bool, Int32, Int64, Float32 and Float64; deterministic widening and fixed-width integer wraparound | `tests/test_infer.py`, `tests/test_arith.py` |
 | Arithmetic | `+ - * / // % **`, unary `-`, Python floor/mod signs, constant integer powers, NaN-aware scalar truthiness | `tests/test_arith.py` |
 | Control flow | `if`, `while`, `for range`, one-dimensional array/string iteration, `break`, `continue`, negative/dynamic steps, nested loops and loop `else` | `tests/test_control_flow.py`, `tests/test_extensions.py` |
@@ -67,7 +67,7 @@ pyjiting uses fixed-width Int32/Int64 values, not arbitrary-precision Python int
 
 Integer arithmetic follows two's-complement fixed-width behavior. In particular, the minimum signed integer divided by -1 remains the minimum signed integer, rather than attempting arbitrary-precision promotion.
 
-Arrays use a stable `data/ndim/shape/strides` ABI. Element reads and writes support checked negative indices and multidimensional, transposed, sliced and negative-stride NumPy views. Out-of-range element or shape indices raise `IndexError`; an index-count mismatch raises `ValueError`. Array creation, broadcasting and whole-array ufunc operations remain deliberately unsupported.
+Arrays use a descriptor-v2 ABI: `data`, `ndim`, `shape`, byte `strides`, `itemsize`, and NumPy flags. Element reads and writes support checked negative indices and multidimensional, transposed, sliced, negative-stride, byte-strided, and unaligned NumPy views. Loads and stores use alignment-safe accesses; an actual write to a read-only view raises `ValueError("assignment destination is read-only")`. Out-of-range element or shape indices raise `IndexError`; an index-count mismatch raises `ValueError`. Array creation, broadcasting, array returns, and whole-array ufunc operations remain deliberately unsupported.
 One-dimensional strided arrays support native `sum`, `any`, and `all`; int32/float32 sums widen to int64/float64 and empty identities match Python.
 
 Immutable numeric and string globals/nonlocals are frozen into Core literals when `@jit` is applied. Native `math` support includes `sin`, `cos`, `sqrt`, `exp`, `log`, `log2`, `log10`, floating classification, and the standard constants. Domain and range failures use the JIT error ABI.
@@ -76,7 +76,7 @@ Strings use a length-delimited UTF-32 ABI, so Unicode code-point indexing and em
 
 Tuples are immutable fixed-length structural types. A tuple's element types participate in specialization and mangling. Native values use pointers to shape-specific structures retained by the per-dispatch arena, avoiding platform-dependent aggregate-return ABIs. Python and JIT-to-JIT boundaries support nested numeric/string tuples.
 
-Each specialization uses a private LLVM symbol derived from the decorated Python function identity plus its type signature. Two functions with the same short name therefore cannot share a cached native implementation by accident.
+Each specialization is keyed by its decorated compilation-unit identity and argument types, and uses a private LLVM symbol. Functions with the same short name, source location, or signature therefore cannot share a cached native implementation by accident. `runtime_stats()` exposes cache/callback/literal counters; `clear_cache(function=None)` removes dispatcher cache entries but does not claim to release MCJIT code memory.
 ## Requirements
 - Python >= 3.12
 - [uv](https://docs.astral.sh/uv/)
@@ -145,7 +145,7 @@ print(test(11.4, 51.4))  # 62.8  (double specialization)
 
 `@jit` marks a function as a compilation target. Its source is parsed when the decorator runs, then it is specialized and compiled to native code on the first call for each argument-type signature. Use it for the numerical and control-flow-heavy part of a workload.
 
-`@reg` marks an ordinary Python function as a callback that JIT-compiled code may invoke. It is not compiled by pyjiting: the native function crosses the ctypes callback boundary to execute the original Python implementation. Use it for reporting, logging, or existing Python-only operations. Registered functions need supported scalar parameter and return annotations: `int`, `float`, `bool`, `np.int32`, `np.int64`, `np.float32`, or `np.float64`. They must not raise an exception across the callback boundary.
+`@reg` marks an ordinary Python function as a callback that JIT-compiled code may invoke. It is not compiled by pyjiting: the native function crosses the ctypes callback boundary to execute the original Python implementation. Use it for reporting, logging, or existing Python-only operations. Registered functions need supported scalar/string parameter and return annotations: `int`, `float`, `bool`, `str`, `np.int32`, `np.int64`, `np.float32`, or `np.float64`. Registrations are bound by callable identity, so same-named callbacks remain isolated. A callback exception is captured by the dispatch frame and re-raised at the outer Python call site; native user logic does not continue with a placeholder return value.
 
 | Decorator | Role | Runs as | Typical use |
 |---|---|---|---|
@@ -266,7 +266,7 @@ This is a research/educational project, not a production JIT. Among others:
 - Runtime division by zero raises `ZeroDivisionError`; a dynamic zero range step raises `ValueError` through the JIT error-status ABI.
 - A non-void JIT function must return on every control-flow path.
 - Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.
-- Registered (`@reg`) functions need supported scalar or string annotations and must not raise across the callback boundary.
+- Registered (`@reg`) functions need supported scalar or string annotations. Callback exceptions are re-raised at the outer Python call site; they do not cross the ctypes ABI.
 - Default, keyword-only, variadic and keyword call arguments are rejected. JIT calls accept exactly their declared positional argument count.
 - Mutable globals, lists/dicts, starred or nested unpack targets, dynamic tuple indexing, tuple mutation/comparison/iteration, arbitrary Python objects, multidimensional reductions/iteration, reduction axes and array-wide NumPy operations are unsupported.
 # Special thanks

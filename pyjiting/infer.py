@@ -1,9 +1,10 @@
 from . import ast as core
 from .errors import InferError
 from .intrinsics import MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS
-from .types import (FuncType, TupleType, bool_t, can_widen, double64_t, float32_t,
-                    int32_t, int64_t, is_array, is_integer, is_numeric, is_string,
-                    is_truthy_type, is_tuple, promote_numeric, shape_t, str_t, void_t)
+from .types import (FuncType, TupleType, bool_t, can_widen, contains_array,
+                    double64_t, float32_t, int32_t, int64_t, is_array, is_integer,
+                    is_numeric, is_string, is_truthy_type, is_tuple, promote_numeric,
+                    shape_t, str_t, void_t)
 
 
 class UnderDetermined(InferError):
@@ -13,9 +14,10 @@ class UnderDetermined(InferError):
 class TypeInferencer:
     """Infer one monomorphic specialization and annotate Core AST nodes in place."""
 
-    def __init__(self, arg_types=None, registry=None, jit_resolver=None):
+    def __init__(self, arg_types=None, registry=None, jit_resolver=None, reg_resolver=None):
         self.arg_types, self.registry = arg_types, registry or {}
         self.jit_resolver = jit_resolver
+        self.reg_resolver = reg_resolver
         self.env, self.return_type, self.org_func_name = {}, None, None
 
     def visit(self, node):
@@ -49,6 +51,8 @@ class TypeInferencer:
         for stmt in node.body: self._visit_statement(stmt)
         if self.return_type is None: self.return_type = void_t
         if node.return_annotation: self.return_type = self._coerce(self.return_type, node.return_annotation, node)
+        if contains_array(self.return_type):
+            raise InferError('ndarray return values are not supported', node)
         if self.return_type != void_t and not self._always_returns(node.body):
             raise InferError('non-Void function has a path without return', node)
         return FuncType(args=self.arg_types, return_type=self.return_type)
@@ -58,6 +62,9 @@ class TypeInferencer:
             if isinstance(statement, list):
                 if self._always_returns(statement): return True
             elif isinstance(statement, core.Return):
+                return True
+            elif (isinstance(statement, core.While) and isinstance(statement.test, core.LitBool)
+                  and statement.test.n and self._always_returns(statement.body)):
                 return True
             elif isinstance(statement, core.If):
                 if statement.orelse and self._always_returns(statement.body) and self._always_returns(statement.orelse):
@@ -83,6 +90,7 @@ class TypeInferencer:
 
     def visit_Assign(self, node):
         value_ty = self.visit(node.value); expected = node.annotation or self.env.get(node.ref)
+        if value_ty == void_t: raise InferError('cannot assign a Void value', node)
         node.type = self._coerce(value_ty, expected, node) if expected else value_ty
         self.env[node.ref] = node.type
 
@@ -210,8 +218,29 @@ class TypeInferencer:
         body_env = self.env.copy(); self.env = before.copy()
         for stmt in node.orelse: self._visit_statement(stmt)
         else_env = self.env.copy()
-        for name in body_env.keys() & else_env.keys():
-            if body_env[name] == else_env[name]: self.env[name] = body_env[name]
+        merged = before.copy()
+        if node.orelse:
+            for name in body_env.keys() & else_env.keys():
+                left, right = body_env[name], else_env[name]
+                common = left if left == right else promote_numeric(left, right)
+                if common is None:
+                    raise InferError(f'incompatible branch types for {name}: {left} and {right}', node)
+                self._retarget_assignments(node.body, name, common)
+                self._retarget_assignments(node.orelse, name, common)
+                merged[name] = common
+        self.env = merged
+
+    def _retarget_assignments(self, statements, name, target):
+        for statement in statements:
+            if isinstance(statement, list):
+                self._retarget_assignments(statement, name, target)
+            elif isinstance(statement, core.Assign) and statement.ref == name:
+                statement.type = target
+            elif isinstance(statement, core.UnpackAssign) and name in statement.refs:
+                statement.ref_types[statement.refs.index(name)] = target
+            elif isinstance(statement, (core.If, core.While, core.Loop, core.ForEach)):
+                self._retarget_assignments(statement.body, name, target)
+                self._retarget_assignments(statement.orelse, name, target)
 
     def visit_While(self, node):
         test_ty = self.visit(node.test)
@@ -241,8 +270,14 @@ class TypeInferencer:
         self.env = {name: ty for name, ty in self.env.items() if name in before}
 
     def visit_Return(self, node):
-        value_ty = self.visit(node.value)
-        self.return_type = value_ty if self.return_type is None else self._coerce(value_ty, self.return_type, node)
+        value_ty = void_t if node.value is None else self.visit(node.value)
+        if self.return_type is None:
+            self.return_type = value_ty
+        elif self.return_type != value_ty:
+            common = promote_numeric(self.return_type, value_ty)
+            if common is None:
+                raise InferError(f'incompatible return types {self.return_type} and {value_ty}', node)
+            self.return_type = common
 
     def visit_CallFunc(self, node):
         arg_types = [self.visit(arg) for arg in node.args]
@@ -309,6 +344,13 @@ class TypeInferencer:
             signature, symbol = self.jit_resolver(node.fn.id, arg_types)
             if signature is not None:
                 node.jit_signature, node.jit_symbol = signature, symbol
+                node.type = signature.return_type; return node.type
+        if self.reg_resolver is not None:
+            signature, registration_id = self.reg_resolver(node.fn.id)
+            if signature is not None:
+                if len(signature.args) != len(arg_types): raise InferError('wrong number of callback arguments', node)
+                for actual, expected in zip(arg_types, signature.args): self._coerce(actual, expected, node)
+                node.registered_id = registration_id
                 node.type = signature.return_type; return node.type
         signature = self.registry.get(node.fn.id)
         if signature is None: raise InferError(f'function {node.fn.id!r} is not registered', node)

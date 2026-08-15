@@ -1,2 +1,2 @@
-llvmlite
-numpy
+llvmlite>=0.49.0
+numpy>=2.5.2
