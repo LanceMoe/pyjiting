@@ -1,4 +1,5 @@
 import ast
+import copy
 
 
 class Node(ast.AST):
@@ -10,6 +11,13 @@ class Node(ast.AST):
                 if hasattr(source, name):
                     setattr(self, name, getattr(source, name))
         self.type = None
+
+    def __deepcopy__(self, memo):
+        cloned = type(self).__new__(type(self))
+        memo[id(self)] = cloned
+        for name, value in self.__dict__.items():
+            setattr(cloned, name, value if name == 'namespace' else copy.deepcopy(value, memo))
+        return cloned
 
 
 class Var(Node):
@@ -46,6 +54,12 @@ class Loop(Node):
     _fields = ('var', 'begin', 'end', 'body', 'step', 'orelse')
     def __init__(self, var, begin, end, body, step, orelse=None, source=None):
         super().__init__(source); self.var, self.begin, self.end = var, begin, end; self.body, self.step, self.orelse = body, step, orelse or []
+
+
+class ForEach(Node):
+    _fields = ('var', 'iterable', 'body', 'orelse')
+    def __init__(self, var, iterable, body, orelse=None, source=None):
+        super().__init__(source); self.var, self.iterable = var, iterable; self.body, self.orelse = body, orelse or []
 
 
 class If(Node):
@@ -93,6 +107,11 @@ class LitBool(Node):
     def __init__(self, n, source=None): super().__init__(source); self.n = bool(n)
 
 
+class LitStr(Node):
+    _fields = ('value',)
+    def __init__(self, value, source=None): super().__init__(source); self.value = str(value)
+
+
 class Prim(Node):
     _fields = ('fn', 'args')
     def __init__(self, fn, args, source=None): super().__init__(source); self.fn, self.args, self.operand_type = fn, args, None
@@ -101,6 +120,12 @@ class Prim(Node):
 class Index(Node):
     _fields = ('value', 'indices')
     def __init__(self, value, indices, source=None): super().__init__(source); self.value = value; self.indices = indices if isinstance(indices, list) else [indices]
+
+
+class Slice(Node):
+    _fields = ('lower', 'upper', 'step')
+    def __init__(self, lower, upper, step, source=None):
+        super().__init__(source); self.lower, self.upper, self.step = lower, upper, step
 
 
 class Expr(Node):

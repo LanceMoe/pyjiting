@@ -75,6 +75,7 @@ double64_t = BaseType('Double')
 void_t = BaseType('Void')
 array_t = BaseType('Array')
 shape_t = BaseType('Shape')
+str_t = BaseType('String')
 
 ptr_t = PointerType
 
@@ -120,6 +121,14 @@ def is_integer(ty):
 
 def is_float(ty):
     return ty in float_types
+
+
+def is_string(ty):
+    return ty == str_t
+
+
+def is_truthy_type(ty):
+    return is_numeric(ty) or is_string(ty)
 
 
 def promote_numeric(left, right):

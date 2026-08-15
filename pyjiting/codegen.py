@@ -7,10 +7,13 @@ from llvmlite import ir
 
 from . import ast as core
 from .errors import CodegenError
+from .intrinsics import STRING_INTRINSICS
 from .ll_types import mangler
 from .registry import get as get_registered, keep_callback
 from .types import (bool_t, double64_t, float32_t, int32_t, int64_t, is_array,
-                    is_float, is_integer, shape_t, void_t)
+                    is_float, is_integer, is_string, shape_t, str_t, void_t)
+from .string_runtime import (StringPointer, callback_address, literal_address,
+                             make_string, to_python)
 
 
 ir_i1 = ir.IntType(1)
@@ -24,6 +27,7 @@ ERROR_NONE = 0
 ERROR_DIVISION_BY_ZERO = 1
 ERROR_RANGE_STEP_ZERO = 2
 ERROR_ARRAY_DIMENSION_MISMATCH = 3
+ERROR_INDEX_OUT_OF_BOUNDS = 4
 
 
 def array_type(element):
@@ -34,9 +38,17 @@ def array_type(element):
     return ir.PointerType(struct)
 
 
+def string_type():
+    struct = ir.global_context.get_identified_type('pyjiting.string')
+    if not struct.elements:
+        struct.set_body(ir.PointerType(ir_i32), ir_i64)
+    return ir.PointerType(struct)
+
+
 TYPE_MAP = {
     int32_t: ir_i32, int64_t: ir_i64, bool_t: ir_i64, float32_t: ir_f32,
     double64_t: ir_f64, void_t: ir_void,
+    str_t: string_type(),
 }
 
 
@@ -115,6 +127,9 @@ class LLVMCodeGen:
     def truthy(self, value, ty, normalize=False):
         if ty == bool_t or is_integer(ty): result = self.builder.icmp_signed('!=', value, ir.Constant(value.type, 0))
         elif is_float(ty): result = self.builder.fcmp_unordered('!=', value, ir.Constant(value.type, 0.0))
+        elif is_string(ty):
+            length = self.builder.load(self.builder.gep(value, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, 1)]))
+            result = self.builder.icmp_signed('!=', length, ir.Constant(ir_i64, 0))
         else: raise CodegenError(f'cannot use {ty} as a condition')
         return self.builder.zext(result, ir_i64) if normalize else result
 
@@ -156,6 +171,7 @@ class LLVMCodeGen:
         for item in self.walk_nodes(node):
             if isinstance(item, core.Assign): local_types[item.ref] = item.type
             elif isinstance(item, core.Loop): local_types[item.var.id] = int64_t
+            elif isinstance(item, core.ForEach): local_types[item.var.id] = item.var.type
         if self.return_type != void_t:
             self.return_slot = self.builder.alloca(to_lltype(self.return_type), name='retval')
         for name, ty in local_types.items():
@@ -193,6 +209,8 @@ class LLVMCodeGen:
     def visit_LitInt(self, node): return ir.Constant(to_lltype(node.type), node.n)
     def visit_LitFloat(self, node): return ir.Constant(to_lltype(node.type), node.n)
     def visit_LitBool(self, node): return ir.Constant(ir_i64, int(node.n))
+    def visit_LitStr(self, node):
+        return self.builder.inttoptr(ir.Constant(ir_i64, literal_address(node.value)), string_type())
     def visit_Var(self, node):
         if node.id in self.arrays: return self.locals[node.id]
         return self.builder.load(self.locals[node.id])
@@ -204,16 +222,41 @@ class LLVMCodeGen:
         self.guard(dimension_matches, ERROR_ARRAY_DIMENSION_MISMATCH)
         offset = ir.Constant(ir_i64, 0)
         for dim, index in enumerate(indices):
+            shape_ptr = self.builder.gep(metadata['shape'], [ir.Constant(ir_i64, dim)])
+            size = self.builder.load(shape_ptr)
+            raw_index = self.cast(self.visit(index), index.type, int64_t)
+            negative = self.builder.icmp_signed('<', raw_index, ir.Constant(ir_i64, 0))
+            normalized = self.builder.select(negative, self.builder.add(raw_index, size), raw_index)
+            lower_ok = self.builder.icmp_signed('>=', normalized, ir.Constant(ir_i64, 0))
+            upper_ok = self.builder.icmp_signed('<', normalized, size)
+            self.guard(self.builder.and_(lower_ok, upper_ok), ERROR_INDEX_OUT_OF_BOUNDS)
             stride_ptr = self.builder.gep(metadata['strides'], [ir.Constant(ir_i64, dim)])
             stride = self.builder.load(stride_ptr)
-            offset = self.builder.add(offset, self.builder.mul(self.cast(self.visit(index), index.type, int64_t), stride))
+            offset = self.builder.add(offset, self.builder.mul(normalized, stride))
         return self.builder.gep(metadata['data'], [offset]), metadata['element']
 
     def visit_Index(self, node):
+        if is_string(node.value.type):
+            value = self.visit(node.value); index = node.indices[0]
+            if isinstance(index, core.Slice):
+                lower = self.cast(self.visit(index.lower), index.lower.type, int64_t) if index.lower else ir.Constant(ir_i64, 0)
+                upper = self.cast(self.visit(index.upper), index.upper.type, int64_t) if index.upper else ir.Constant(ir_i64, 0)
+                return self._runtime_call('slice', string_type(), [string_type(), ir_i64, ir_i64, ir_i64, ir_i64],
+                                          [value, ir.Constant(ir_i64, int(index.lower is not None)), lower,
+                                           ir.Constant(ir_i64, int(index.upper is not None)), upper])
+            result = self._runtime_call('index', string_type(), [string_type(), ir_i64, ir.PointerType(ir_i32)],
+                                        [value, self.cast(self.visit(index), index.type, int64_t), self.error_ptr])
+            self.propagate_error(); return result
         if node.value.type == shape_t:
             if not isinstance(node.value, core.Prim) or not isinstance(node.value.args[0], core.Var): raise CodegenError('shape value is not indexable', node)
-            shape = self.arrays[node.value.args[0].id]['shape']
-            index = self.cast(self.visit(node.indices[0]), node.indices[0].type, int64_t)
+            metadata = self.arrays[node.value.args[0].id]
+            shape = metadata['shape']
+            raw_index = self.cast(self.visit(node.indices[0]), node.indices[0].type, int64_t)
+            negative = self.builder.icmp_signed('<', raw_index, ir.Constant(ir_i64, 0))
+            index = self.builder.select(negative, self.builder.add(raw_index, metadata['ndim']), raw_index)
+            lower_ok = self.builder.icmp_signed('>=', index, ir.Constant(ir_i64, 0))
+            upper_ok = self.builder.icmp_signed('<', index, metadata['ndim'])
+            self.guard(self.builder.and_(lower_ok, upper_ok), ERROR_INDEX_OUT_OF_BOUNDS)
             return self.builder.load(self.builder.gep(shape, [index]))
         address, _ = self._index_address(node.value, node.indices)
         return self.builder.load(address)
@@ -252,6 +295,11 @@ class LLVMCodeGen:
         self.builder.store(self.cast(result, node.type, element), address)
 
     def _compare(self, op, left, right, ty):
+        if is_string(ty):
+            compared = self._runtime_call('compare', ir_i64, [string_type(), string_type()], [left, right])
+            zero = ir.Constant(ir_i64, 0)
+            predicates = {'eq#': '==', 'ne#': '!=', 'lt#': '<', 'le#': '<=', 'gt#': '>', 'ge#': '>='}
+            return self.builder.icmp_signed(predicates[op], compared, zero)
         if is_float(ty):
             predicates = {'eq#': '==', 'ne#': '!=', 'lt#': '<', 'le#': '<=', 'gt#': '>', 'ge#': '>='}
             if op == 'ne#': return self.builder.fcmp_unordered(predicates[op], left, right)
@@ -292,6 +340,7 @@ class LLVMCodeGen:
         return result
 
     def _common(self, left, right):
+        if is_string(left) and is_string(right): return str_t
         from .types import promote_numeric
         result = promote_numeric(left, right)
         if result is None: raise CodegenError(f'no common type for {left}, {right}')
@@ -305,6 +354,14 @@ class LLVMCodeGen:
             return self.builder.zext(self.builder.not_(truth), ir_i64)
         if node.fn == 'neg#':
             value = self.visit(node.args[0]); return self.builder.fneg(value) if is_float(node.type) else self.builder.neg(value)
+        if node.fn == 'add#' and is_string(node.type):
+            return self._runtime_call('concat', string_type(), [string_type(), string_type()],
+                                      [self.visit(node.args[0]), self.visit(node.args[1])])
+        if node.fn == 'mult#' and is_string(node.type):
+            if is_string(node.args[0].type): value, count_node = self.visit(node.args[0]), node.args[1]
+            else: value, count_node = self.visit(node.args[1]), node.args[0]
+            count = self.cast(self.visit(count_node), count_node.type, int64_t)
+            return self._runtime_call('repeat', string_type(), [string_type(), ir_i64], [value, count])
         left = self.cast(self.visit(node.args[0]), node.args[0].type, node.operand_type)
         right = self.cast(self.visit(node.args[1]), node.args[1].type, node.operand_type)
         if node.fn == 'add#': return self.builder.fadd(left, right) if is_float(node.type) else self.builder.add(left, right)
@@ -446,6 +503,44 @@ class LLVMCodeGen:
             if not self.terminated(): self.builder.branch(after)
         self.set_block(after)
 
+    def visit_ForEach(self, node):
+        iterable = self.visit(node.iterable)
+        init, test, body, latch, after = (self.new_block('foreach_init'), self.new_block('foreach_test'),
+                                          self.new_block('foreach_body'), self.new_block('foreach_latch'),
+                                          self.new_block('foreach_after'))
+        otherwise = self.new_block('foreach_else') if node.orelse else after
+        index_ptr = self.builder.alloca(ir_i64, name=f'foreach_index_{self.counter}')
+        self.builder.branch(init); self.set_block(init)
+        self.builder.store(ir.Constant(ir_i64, 0), index_ptr)
+        if is_array(node.iterable.type):
+            if not isinstance(node.iterable, core.Var) or node.iterable.id not in self.arrays:
+                raise CodegenError('only parameter arrays can be iterated', node.iterable)
+            metadata = self.arrays[node.iterable.id]
+            self.guard(self.builder.icmp_signed('==', metadata['ndim'], ir.Constant(ir_i64, 1)),
+                       ERROR_ARRAY_DIMENSION_MISMATCH)
+            length = self.builder.load(metadata['shape'])
+        else:
+            length = self.builder.load(self.builder.gep(iterable, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, 1)]))
+        self.builder.branch(test); self.set_block(test)
+        index = self.builder.load(index_ptr)
+        self.builder.cbranch(self.builder.icmp_signed('<', index, length), body, otherwise)
+        self.break_blocks.append(after); self.continue_blocks.append(latch)
+        self.set_block(body)
+        if is_array(node.iterable.type):
+            stride = self.builder.load(metadata['strides'])
+            item = self.builder.load(self.builder.gep(metadata['data'], [self.builder.mul(index, stride)]))
+        else:
+            item = self._runtime_call('index', string_type(), [string_type(), ir_i64, ir.PointerType(ir_i32)],
+                                      [iterable, index, self.error_ptr])
+        self.builder.store(item, self.locals[node.var.id]); self.visit(node.body)
+        if not self.terminated(): self.builder.branch(latch)
+        self.set_block(latch); self.builder.store(self.builder.add(self.builder.load(index_ptr), ir.Constant(ir_i64, 1)), index_ptr); self.builder.branch(test)
+        self.continue_blocks.pop(); self.break_blocks.pop()
+        if node.orelse:
+            self.set_block(otherwise); self.visit(node.orelse)
+            if not self.terminated(): self.builder.branch(after)
+        self.set_block(after)
+
     def visit_Break(self, node): self.builder.branch(self.break_blocks[-1])
     def visit_Continue(self, node): self.builder.branch(self.continue_blocks[-1])
 
@@ -455,17 +550,69 @@ class LLVMCodeGen:
 
     def visit_CallFunc(self, node):
         args = [self.visit(arg) for arg in node.args]
+        if node.fn.id == 'len':
+            value = args[0]
+            if is_string(node.args[0].type):
+                return self.builder.load(self.builder.gep(value, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, 1)]))
+            if not isinstance(node.args[0], core.Var) or node.args[0].id not in self.arrays:
+                raise CodegenError('len only supports parameter arrays', node.args[0])
+            metadata = self.arrays[node.args[0].id]
+            self.guard(self.builder.icmp_signed('>', metadata['ndim'], ir.Constant(ir_i64, 0)), ERROR_ARRAY_DIMENSION_MISMATCH)
+            return self.builder.load(metadata['shape'])
+        if node.fn.id == 'abs':
+            value = args[0]
+            if is_float(node.type):
+                name = 'llvm.fabs.f32' if node.type == float32_t else 'llvm.fabs.f64'
+                fn = self.module.globals.get(name) or ir.Function(self.module, ir.FunctionType(value.type, [value.type]), name)
+                return self.builder.call(fn, [value])
+            negative = self.builder.icmp_signed('<', value, ir.Constant(value.type, 0))
+            return self.builder.select(negative, self.builder.neg(value), value)
+        if node.fn.id in ('min', 'max'):
+            left = self.cast(args[0], node.args[0].type, node.type); right = self.cast(args[1], node.args[1].type, node.type)
+            if is_float(node.type): predicate = self.builder.fcmp_ordered('<=' if node.fn.id == 'min' else '>=', left, right)
+            else: predicate = self.builder.icmp_signed('<=' if node.fn.id == 'min' else '>=', left, right)
+            return self.builder.select(predicate, left, right)
+        if node.fn.id in STRING_INTRINSICS:
+            name = node.fn.id[4:]
+            return self._runtime_call(name, ir_i64, [string_type(), string_type()], args)
         if node.fn.id == self.org_func_name:
             result = self.builder.call(self.function, args + [self.error_ptr])
+            self.propagate_error()
+            return result
+        if hasattr(node, 'jit_signature'):
+            signature = node.jit_signature
+            ll_args = [to_lltype(ty) for ty in signature.args]
+            function_type = ir.FunctionType(to_lltype(signature.return_type), ll_args + [ir.PointerType(ir_i32)])
+            callee = self.module.globals.get(node.jit_symbol)
+            if callee is None: callee = ir.Function(self.module, function_type, node.jit_symbol)
+            result = self.builder.call(callee, args + [self.error_ptr])
             self.propagate_error()
             return result
         registered = get_registered(node.fn.id)
         if registered is None: raise CodegenError(f'function {node.fn.id!r} is not registered', node)
         fn, signature = registered; ll_args = [to_lltype(ty) for ty in signature.args]; ll_return = to_lltype(signature.return_type)
-        c_args = [ctypes.c_int64 if ty in (int64_t, bool_t) else ctypes.c_int32 if ty == int32_t else ctypes.c_float if ty == float32_t else ctypes.c_double for ty in signature.args]
-        c_return = ctypes.c_int64 if signature.return_type in (int64_t, bool_t) else ctypes.c_int32 if signature.return_type == int32_t else ctypes.c_float if signature.return_type == float32_t else ctypes.c_double
-        callback = ctypes.CFUNCTYPE(c_return, *c_args)(fn); address = keep_callback(node.fn.id, callback)
+        def callback_type(ty):
+            if ty in (int64_t, bool_t): return ctypes.c_int64
+            if ty == int32_t: return ctypes.c_int32
+            if ty == float32_t: return ctypes.c_float
+            if ty == double64_t: return ctypes.c_double
+            if ty == str_t: return StringPointer
+            raise CodegenError(f'unsupported callback type {ty}', node)
+        c_args = [callback_type(ty) for ty in signature.args]
+        c_return = ctypes.c_void_p if signature.return_type == str_t else callback_type(signature.return_type)
+        def bridge(*values):
+            python_values = [to_python(value) if ty == str_t else value for value, ty in zip(values, signature.args)]
+            result = fn(*python_values)
+            if signature.return_type == str_t:
+                return ctypes.cast(make_string(result), ctypes.c_void_p).value
+            return result
+        callback = ctypes.CFUNCTYPE(c_return, *c_args)(bridge); address = keep_callback(node.fn.id, callback)
         pointer_ty = ir.PointerType(ir.FunctionType(ll_return, ll_args)); pointer = self.builder.inttoptr(ir.Constant(ir_i64, address), pointer_ty)
+        return self.builder.call(pointer, args)
+
+    def _runtime_call(self, name, return_type, arg_types, args):
+        pointer_type = ir.PointerType(ir.FunctionType(return_type, arg_types))
+        pointer = self.builder.inttoptr(ir.Constant(ir_i64, callback_address(name)), pointer_type)
         return self.builder.call(pointer, args)
 
     def visit_Expr(self, node): return self.visit(node.value)

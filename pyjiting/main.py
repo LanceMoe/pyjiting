@@ -1,7 +1,9 @@
 # pyright: reportArgumentType=false
 
 import hashlib
+import copy
 import sys
+import threading
 
 import llvmlite.binding as llvm
 import numpy as np
@@ -13,11 +15,13 @@ from .infer import TypeInferencer
 from .ll_types import mangler, wrap_module
 from .parser import ASTVisitor
 from .registry import register, signatures
-from .types import bool_t, double64_t, float32_t, int32_t, int64_t, make_array_type
+from .types import bool_t, double64_t, float32_t, int32_t, int64_t, make_array_type, str_t
 
 
 DEBUG = False
 function_cache = {}
+function_signatures = {}
+compile_lock = threading.RLock()
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 target_machine = llvm.Target.from_default_triple().create_target_machine()
@@ -42,39 +46,55 @@ def arg_pytype(arg):
     if isinstance(arg, np.float32): return float32_t
     if isinstance(arg, np.floating) or isinstance(arg, float): return double64_t
     if isinstance(arg, int) and -sys.maxsize - 1 <= arg <= sys.maxsize: return int64_t
+    if isinstance(arg, str): return str_t
     raise TypeError(f'Unsupported type: {type(arg).__name__}')
 
 
-def typeinfer(tree, arg_types, registry=None):
-    return TypeInferencer(arg_types, registry or signatures()).visit(tree)
+def typeinfer(tree, arg_types, registry=None, jit_resolver=None):
+    return TypeInferencer(arg_types, registry or signatures(), jit_resolver).visit(tree)
 
 
 def compile_specialization(tree, arg_types):
-    function_type = typeinfer(tree, arg_types)
     key = mangler(tree.symbol, arg_types)
-    if key in function_cache: return function_cache[key]
-    module = ir.Module(name=f'pyjiting.{key}')
-    module.triple = llvm.get_default_triple()
-    llfunc = LLVMCodeGen(module, function_type.return_type, arg_types).visit(tree)
-    binding_module = llvm.parse_assembly(str(module)); binding_module.verify()
-    pto = llvm.create_pipeline_tuning_options(speed_level=3); pto.loop_vectorization = True
-    pass_builder = llvm.create_pass_builder(target_machine, pto)
-    pass_builder.getModulePassManager().run(binding_module, pass_builder)
-    engine.add_module(binding_module); engine.finalize_object()
-    wrapper = wrap_module(arg_types, llfunc, engine); function_cache[key] = wrapper
-    debug(module)
-    return wrapper
+    with compile_lock:
+        if key in function_cache: return function_cache[key]
+        specialized = copy.deepcopy(tree)
+
+        def resolve_jit(name, call_arg_types):
+            candidate = getattr(tree, 'namespace', {}).get(name)
+            callee_tree = getattr(candidate, '__pyjiting_tree__', None)
+            if callee_tree is None: return None, None
+            compile_specialization(callee_tree, call_arg_types)
+            callee_key = mangler(callee_tree.symbol, call_arg_types)
+            return function_signatures[callee_key], callee_key
+
+        function_type = typeinfer(specialized, arg_types, jit_resolver=resolve_jit)
+        module = ir.Module(name=f'pyjiting.{key}')
+        module.triple = llvm.get_default_triple()
+        llfunc = LLVMCodeGen(module, function_type.return_type, arg_types).visit(specialized)
+        binding_module = llvm.parse_assembly(str(module)); binding_module.verify()
+        pto = llvm.create_pipeline_tuning_options(speed_level=3); pto.loop_vectorization = True
+        pass_builder = llvm.create_pass_builder(target_machine, pto)
+        pass_builder.getModulePassManager().run(binding_module, pass_builder)
+        engine.add_module(binding_module); engine.finalize_object()
+        wrapper = wrap_module(arg_types, llfunc, engine)
+        function_signatures[key] = function_type
+        function_cache[key] = wrapper
+        debug(module)
+        return wrapper
 
 
 def jit(fn):
     tree = ASTVisitor()(fn)
     identity = '\0'.join((fn.__module__, fn.__qualname__, fn.__code__.co_filename, str(fn.__code__.co_firstlineno))).encode()
     tree.symbol = 'jit_' + hashlib.sha256(identity).hexdigest()[:16]
+    tree.namespace = fn.__globals__
     def wrapper(*args):
         if len(args) != len(tree.args):
             raise TypeError(f'{fn.__name__}() takes {len(tree.args)} positional arguments but {len(args)} were given')
         return compile_specialization(tree, [arg_pytype(arg) for arg in args])(*args)
     wrapper.__name__, wrapper.__doc__, wrapper.__wrapped__ = fn.__name__, fn.__doc__, fn
+    wrapper.__pyjiting_tree__ = tree
     return wrapper
 
 

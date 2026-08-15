@@ -5,7 +5,8 @@ from textwrap import dedent
 
 from . import ast as core
 from .errors import CompileError
-from .types import bool_t, double64_t, float32_t, int32_t, int64_t
+from .intrinsics import STRING_METHODS
+from .types import bool_t, double64_t, float32_t, int32_t, int64_t, str_t
 
 
 def get_type_hint(annotation):
@@ -23,6 +24,8 @@ def get_type_hint(annotation):
         return double64_t
     if annotation is bool:
         return bool_t
+    if annotation is str:
+        return str_t
     name = getattr(annotation, '__name__', None)
     if name is not None:
         return {'int32': int32_t, 'int64': int64_t, 'float32': float32_t,
@@ -30,7 +33,7 @@ def get_type_hint(annotation):
     if isinstance(annotation, ast.Name):
         return {'int': int64_t, 'int64': int64_t, 'int32': int32_t,
                 'float': double64_t, 'float64': double64_t, 'float32': float32_t,
-                'bool': bool_t}.get(annotation.id)
+                'bool': bool_t, 'str': str_t}.get(annotation.id)
     if isinstance(annotation, ast.Attribute):
         return {'int32': int32_t, 'int64': int64_t, 'float32': float32_t,
                 'float64': double64_t, 'bool_': bool_t}.get(annotation.attr)
@@ -96,6 +99,7 @@ class ASTVisitor(ast.NodeVisitor):
         if isinstance(node.value, bool): return core.LitBool(node.value, node)
         if isinstance(node.value, int): return core.LitInt(node.value, node)
         if isinstance(node.value, float): return core.LitFloat(node.value, node)
+        if isinstance(node.value, str): return core.LitStr(node.value, node)
         raise CompileError(f'unsupported constant {node.value!r}', node)
 
     def visit_Return(self, node):
@@ -165,8 +169,11 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_While(self, node): return core.While(self.visit(node.test), self._visit_loop_body(node.body), [self.visit(x) for x in node.orelse], node)
 
     def visit_For(self, node):
-        if not isinstance(node.target, ast.Name) or not isinstance(node.iter, ast.Call) or not isinstance(node.iter.func, ast.Name) or node.iter.func.id not in ('range', 'xrange'):
-            raise CompileError('for loops must iterate a named variable over range()', node)
+        if not isinstance(node.target, ast.Name):
+            raise CompileError('for loop targets must be named variables', node.target)
+        if not (isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name) and node.iter.func.id in ('range', 'xrange')):
+            return core.ForEach(core.Var(node.target.id, source=node.target), self.visit(node.iter),
+                                self._visit_loop_body(node.body), [self.visit(x) for x in node.orelse], node)
         args = [self.visit(arg) for arg in node.iter.args]
         if not 1 <= len(args) <= 3: raise CompileError('range() expects one to three arguments', node.iter)
         begin, end, step = core.LitInt(0, node), args[0], core.LitInt(1, node)
@@ -185,9 +192,14 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_Expr(self, node): return core.Expr(self.visit(node.value), node)
 
     def visit_Call(self, node):
-        if not isinstance(node.func, ast.Name): raise CompileError('only calls to named functions are supported', node)
         if node.keywords:
             raise CompileError('keyword arguments are not supported', node)
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr not in STRING_METHODS:
+                raise CompileError(f'unsupported method {node.func.attr!r}', node.func)
+            return core.CallFunc(core.Var(f'str.{node.func.attr}', source=node.func),
+                                 [self.visit(node.func.value), *[self.visit(arg) for arg in node.args]], node)
+        if not isinstance(node.func, ast.Name): raise CompileError('only calls to named functions are supported', node)
         return core.CallFunc(self.visit(node.func), [self.visit(arg) for arg in node.args], node)
 
     def visit_Attribute(self, node):
@@ -197,6 +209,11 @@ class ASTVisitor(ast.NodeVisitor):
     def _subscript_parts(self, node):
         elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
         return self.visit(node.value), [self.visit(element) for element in elements]
+
+    def visit_Slice(self, node):
+        return core.Slice(self.visit(node.lower) if node.lower else None,
+                          self.visit(node.upper) if node.upper else None,
+                          self.visit(node.step) if node.step else None, node)
 
     def visit_Subscript(self, node):
         value, indices = self._subscript_parts(node)

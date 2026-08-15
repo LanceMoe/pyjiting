@@ -2,7 +2,7 @@ import ctypes
 import inspect
 import typing
 
-from .types import FuncType, bool_t, double64_t, float32_t, int32_t, int64_t, void_t
+from .types import FuncType, bool_t, double64_t, float32_t, int32_t, int64_t, str_t, void_t
 
 
 _registered = {}
@@ -10,7 +10,7 @@ _callbacks = {}
 
 
 def annotation_type(annotation):
-    mapping = {int: int64_t, float: double64_t, bool: bool_t, type(None): void_t}
+    mapping = {int: int64_t, float: double64_t, bool: bool_t, str: str_t, type(None): void_t}
     try:
         import numpy as np
         mapping.update({np.int32: int32_t, np.int64: int64_t, np.float32: float32_t, np.float64: double64_t})
@@ -37,5 +37,5 @@ def get(name): return _registered.get(name)
 
 
 def keep_callback(name, callback):
-    _callbacks[name] = callback
+    _callbacks.setdefault(name, []).append(callback)
     return ctypes.cast(callback, ctypes.c_void_p).value

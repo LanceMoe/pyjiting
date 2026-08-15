@@ -51,12 +51,14 @@ Pyjiting 在函数首次被调用时将其 JIT 编译为原生机器码。被 `@
 
 | 领域 | 支持的行为 | 回归测试覆盖 |
 | --- | --- | --- |
-| 特化 | 针对标量/数组签名生成独立的特化原生代码、确定性命名、LLVM 模块隔离、同名函数互不干扰 | `tests/test_specialization.py` |
+| 特化 | 针对标量/数组/字符串签名生成独立原生代码、确定性命名、并发编译隔离与原生 JIT 函数互调 | `tests/test_specialization.py`、`tests/test_extensions.py` |
 | 标量 | `bool`、`int32`、`int64`、`float32`、`float64`；确定性的类型提升与定宽整数回绕（Wrap-around） | `tests/test_infer.py`、`tests/test_arith.py` |
 | 算术 | `+ - * / // % **`、一元 `-`、符合 Python 规范的 floor/mod 符号语义、常量整数幂、适配 NaN 的标量真值判定 | `tests/test_arith.py` |
-| 控制流 | `if`、`while`、`for in range(...)`、`break`、`continue`，支持负步长/动态步长、嵌套循环以及循环 `else` 分支 | `tests/test_control_flow.py`、`tests/test_runtime_errors.py` |
-| 数组 | `int32`/`int64`/`float32`/`float64` 类型的 `ndarray`；支持带步长（Strided）的多维读写、形状索引、转置/切片/Fortran 序/负步长视图 | `tests/test_array.py`、`tests/test_abi.py` |
-| 注解与回调 | 标量类型注解、`np.ndarray` dtype 的惰性特化、带类型注解的 `@reg` 回调函数 | `tests/test_parser.py`、`tests/test_reg_callback.py` |
+| 控制流 | `if`、`while`、`for in range(...)`、一维数组/字符串迭代、`break`、`continue`、循环 `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
+| 字符串 | Unicode 参数/字面量/返回值、真值、比较、索引、步长为 1 的切片、拼接/重复及常用查询方法 | `tests/test_string.py` |
+| 数组 | 四种数值 dtype；带边界检查的负索引、多维 Strided 读写、形状索引及一维迭代 | `tests/test_array.py`、`tests/test_abi.py`、`tests/test_extensions.py` |
+| 内建函数 | 静态类型化的 `len`、`abs`、双参数 `min` 和 `max` | `tests/test_extensions.py` |
+| 注解与回调 | 标量/字符串注解、`np.ndarray` dtype 惰性特化、带注解的 `@reg` 回调 | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 验证机制 | 解析器源码位置映射、推导规则校验、LLVM 生成模块合法性验证 | `tests/test_parser.py`、`tests/test_codegen.py` |
 
 ### 数值与数组语义
@@ -65,9 +67,9 @@ Pyjiting 采用定宽的 Int32/Int64，而非 Python 原生的任意精度大整
 
 整数运算严格遵循二进制补码的定宽语义。特别地，最小有符号负数除以 `-1` 时不会自动提升精度，而是直接发生溢出并保留为最小有符号负数。
 
-数组底层采用稳定的 `data/ndim/shape/strides` ABI。元素读写完整支持多维、转置、切片和负步长的 NumPy 视图。出于设计考虑，目前**暂不支持**越界检查、数组动态创建、广播（Broadcasting）以及作用于整个数组的 ufunc 矢量运算。
+数组采用稳定的 `data/ndim/shape/strides` ABI。元素和 shape 索引支持负数并进行边界检查，越界抛出 `IndexError`；索引维度数不匹配则抛出 `ValueError`。数组创建、广播及整组 ufunc 运算仍不支持。
 
-索引的维度数必须与运行时的实际数组维度严格一致，否则将抛出 `ValueError`。
+字符串采用带长度的 UTF-32 ABI，可正确处理 Unicode 码点和内嵌 NUL。临时值与返回值由单次调用 arena 管理；切片步长目前仅支持省略或 `1`。
 
 每个特化版本均使用由 Python 函数本体（Identity）及其类型签名派生出的独立 LLVM 符号。因此，即使存在同名的不同函数，也不会发生错误的本地缓存共享。
 
@@ -262,13 +264,13 @@ pyjiting/
 本项目主要用于学术研究与教学探索，并非面向生产环境的成熟 JIT 编译器。目前存在的限制如下：
 
 * 未与垃圾回收机制（GC）集成；仅支持静态类型化的小型 Python 语法子集。
-* `for` 循环仅支持对 `range` 进行遍历；在编译期判定步长为常量 `0` 时将报错。
+* `for` 支持 `range`、字符串和一维数组；多维数组迭代暂不支持。编译期判定 range 步长为常量 `0` 时将报错。
 * 运行时除以零将抛出 `ZeroDivisionError`；动态步长为 `0` 的 `range` 将通过 JIT 错误 ABI 抛出 `ValueError`。
 * 带有非 `None` 声明的 JIT 函数必须在所有控制流分支上均显式返回值（Return）。
 * 整数幂运算（`**`）的指数必须为编译期常量（因动态负指数无法推导确定单一的静态返回类型）。
-* 使用 `@reg` 注册的回调函数必须提供完整的标量类型注解，且不能跨边界抛出异常。
+* 使用 `@reg` 注册的回调函数必须提供完整的标量或字符串类型注解，且不能跨边界抛出异常。
 * 不支持默认参数、仅限关键字参数、可变长参数（`*args`, `**kwargs`）及关键字实参调用。调用实参数量必须与声明的形参严格匹配。
-* 暂不支持 Python 字符串、内置容器（List/Dict 等）、解包赋值、任意 Python 对象、数组越界安全检查及针对整组数组的 NumPy 矢量化操作。
+* 暂不支持内置容器（List/Dict 等）、解包赋值、任意 Python 对象、非单位步长字符串切片及针对整组数组的 NumPy 矢量化操作。
 
 # 特别致谢
 

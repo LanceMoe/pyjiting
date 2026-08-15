@@ -51,12 +51,14 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 
 | 領域 | サポートされる挙動 | 回帰テスト |
 | --- | --- | --- |
-| 特化 | スカラ／配列の各シグネチャに応じたネイティブ特化、決定論的な命名、独立した LLVM モジュール、同名関数の分離 | `tests/test_specialization.py` |
+| 特化 | スカラ／配列／文字列シグネチャごとの特化、決定論的な命名、並行コンパイルの分離、ネイティブ JIT 関数間呼び出し | `tests/test_specialization.py`、`tests/test_extensions.py` |
 | スカラ | `bool`、`int32`、`int64`、`float32`、`float64`。決定論的な型昇格および固定幅整数のラップアラウンド | `tests/test_infer.py`、`tests/test_arith.py` |
 | 演算 | `+ - * / // % **`、単項 `-`、Python 互換の floor/mod 符号規則、定数整数べき乗、NaN を考慮した真理値判定 | `tests/test_arith.py` |
-| 制御フロー | `if`、`while`、`for in range(...)`、`break`、`continue`、負／動的ステップ、ネストしたループ、ループ `else` | `tests/test_control_flow.py`、`tests/test_runtime_errors.py` |
-| 配列 | int32/int64/float32/float64 型の `ndarray`。ストライド付き多次元配列の読み書き、shape 参照、転置／スライス／Fortran 順／負ストライドのビュー | `tests/test_array.py`、`tests/test_abi.py` |
-| アノテーションとコールバック | スカラ型アノテーション、`np.ndarray` dtype の遅延特化、型注釈付き `@reg` コールバック | `tests/test_parser.py`、`tests/test_reg_callback.py` |
+| 制御フロー | `if`、`while`、`range`、一次元配列／文字列の反復、`break`、`continue`、ループ `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
+| 文字列 | Unicode 引数／リテラル／戻り値、真理値、比較、添字、step 1 のスライス、連結／反復、主要な検索メソッド | `tests/test_string.py` |
+| 配列 | 4 種の数値 dtype、境界検査付き負添字、ストライド付き多次元読み書き、shape 添字、一次元反復 | `tests/test_array.py`、`tests/test_abi.py`、`tests/test_extensions.py` |
+| 組み込み関数 | 静的型付き `len`、`abs`、2 引数の `min`／`max` | `tests/test_extensions.py` |
+| アノテーションとコールバック | スカラ／文字列アノテーション、`np.ndarray` dtype の遅延特化、型注釈付き `@reg` | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 検証 | パーサのソース位置保持、推論ルール検証、生成された LLVM モジュールのバリデーション | `tests/test_parser.py`、`tests/test_codegen.py` |
 
 ### 数値と配列のセマンティクス
@@ -65,9 +67,9 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 
 整数演算は 2 の補数表現による固定幅の挙動に準拠します。特に、符号付き最小整数を -1 で割った場合でも任意精度への昇格は行われず、オーバーフローして符号付き最小整数のままとなります。
 
-配列は安定した `data/ndim/shape/strides` ABI を採用しています。要素の読み書きにおいて、多次元・転置・スライス・負ストライドの NumPy ビューをサポートします。なお、境界外チェック、配列の新規生成、ブロードキャスト、配列全体に対する ufunc 演算は意図的にサポート対象外としています。
+配列は安定した `data/ndim/shape/strides` ABI を採用します。要素と shape の負添字および境界検査に対応し、範囲外は `IndexError`、添字数の不一致は `ValueError` になります。配列生成、ブロードキャスト、配列全体の ufunc は未対応です。
 
-インデックスの次元数は、実行時の配列次元数と厳密に一致している必要があります（不一致の場合は `ValueError` を送出）。
+文字列は長さ付き UTF-32 ABI を使用し、Unicode コードポイントと埋め込み NUL を保持します。一時値と戻り値は呼び出し単位の arena で管理され、スライスの step は省略または `1` のみ対応します。
 
 各特化コードは、デコレートされた Python 関数の識別情報（identity）と型シグネチャから生成される一意の LLVM シンボルを使用します。そのため、同じ関数名を持つ別々の関数が誤ってキャッシュを共有してしまうことはありません。
 
@@ -262,13 +264,13 @@ pyjiting/
 本プロジェクトは研究・教育を目的としたプロトタイプ実装であり、プロダクション環境での利用を想定したものではありません。主な制限事項は以下の通りです。
 
 * ガベージコレクション（GC）との統合はなく、静的に型付け可能な Python の一部サブセットのみをサポートします。
-* `for` ループは `range` を用いた反復処理のみに対応しています。なお、コンパイル時にステップ数が 0 と評価される定数はエラーとなります。
+* `for` は `range`、文字列、一次元配列に対応します。多次元配列の反復は未対応です。コンパイル時に range の step が 0 と評価される定数はエラーとなります。
 * 実行時のゼロ除算は `ZeroDivisionError` を送出します。動的にステップ数が 0 となった range は、JIT のエラーハンドリング ABI 経由で `ValueError` を送出します。
 * void 以外の戻り値を持つ JIT 関数は、すべての制御フローパスで値を return する必要があります。
 * 整数のべき乗（`**`）は、指数部がコンパイル時定数である必要があります（動的な負の指数は静的に戻り型を一意に決定できないため）。
-* `@reg` で登録された関数は、サポートされているスカラ型の型アノテーションを完全に備えている必要があり、コールバック境界を跨いで例外を投げることはできません。
+* `@reg` 関数はサポート対象のスカラ型または文字列型アノテーションを完全に備える必要があり、コールバック境界を跨いで例外を投げることはできません。
 * デフォルト引数、キーワード専用引数、可変長引数（`*args`, `**kwargs`）、キーワード引数による呼び出しはサポートしていません。JIT 関数の呼び出しは、宣言された位置引数の数と厳密に一致する必要があります。
-* Python の文字列型、リスト等の組み込みコンテナ、アンパック代入、任意の Python オブジェクト、配列の境界外検査、NumPy の配列全体に対するベクトル演算はサポートされていません。
+* 組み込みコンテナ、アンパック代入、任意の Python オブジェクト、step が 1 以外の文字列スライス、NumPy 配列全体のベクトル演算は未対応です。
 
 # 謝辞
 

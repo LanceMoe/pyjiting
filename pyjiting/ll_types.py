@@ -1,14 +1,19 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalSubscript=false
 
 import ctypes
+from typing import Any
 
 import numpy as np
 from llvmlite import ir
+
+from .string_runtime import (StringDescriptor, StringPointer, begin_call, end_call,
+                             make_string, to_python)
 
 
 ERROR_DIVISION_BY_ZERO = 1
 ERROR_RANGE_STEP_ZERO = 2
 ERROR_ARRAY_DIMENSION_MISMATCH = 3
+ERROR_INDEX_OUT_OF_BOUNDS = 4
 
 
 _scalar_ctypes = {1: ctypes.c_int8, 8: ctypes.c_int8, 16: ctypes.c_int16, 32: ctypes.c_int32, 64: ctypes.c_int64}
@@ -18,19 +23,21 @@ _numpy_ctypes = {np.dtype(np.int32): ctypes.c_int32, np.dtype(np.int64): ctypes.
 def type_repr(ty):
     from .types import GenericType, array_t
     if isinstance(ty, GenericType) and ty.a == array_t: return f'arr_{type_repr(ty.b)}'
-    return {'Int32': 'i32', 'Int64': 'i64', 'Bool': 'bool', 'Float': 'f32', 'Double': 'f64', 'Void': 'void'}.get(str(ty), str(ty).lower())
+    return {'Int32': 'i32', 'Int64': 'i64', 'Bool': 'bool', 'Float': 'f32', 'Double': 'f64',
+            'String': 'str', 'Void': 'void'}.get(str(ty), str(ty).lower())
 
 
 def mangler(fname, signature): return fname + '__' + '_'.join(type_repr(ty) for ty in signature)
 
 
-def wrap_type(llvm_type):
+def wrap_type(llvm_type) -> Any:
     if isinstance(llvm_type, ir.IntType): return _scalar_ctypes[llvm_type.width]
     if isinstance(llvm_type, ir.DoubleType): return ctypes.c_double
     if isinstance(llvm_type, ir.FloatType): return ctypes.c_float
     if isinstance(llvm_type, ir.VoidType): return None
     if isinstance(llvm_type, ir.PointerType): return ctypes.POINTER(wrap_type(llvm_type.pointee))
     if isinstance(llvm_type, ir.IdentifiedStructType):
+        if llvm_type.name == 'pyjiting.string': return StringDescriptor
         cached = getattr(llvm_type, '_pyjiting_ctype', None)
         if cached is not None: return cached
         fields = [('data', wrap_type(llvm_type.elements[0])), ('ndim', ctypes.c_int64), ('shape', ctypes.POINTER(ctypes.c_int64)), ('strides', ctypes.POINTER(ctypes.c_int64))]
@@ -53,6 +60,7 @@ def wrap_arg(arg, value):
     if isinstance(value, np.ndarray):
         data, ndim, shape, strides = wrap_ndarray(value)
         return arg._type_(data, ndim, shape, strides)
+    if isinstance(value, str): return make_string(value)
     return value
 
 
@@ -65,14 +73,19 @@ def wrap_function(func, engine):
 
 def dispatcher(fn, user_arg_count):
     def call(*args):
-        error = ctypes.c_int32(0)
-        values = [wrap_arg(arg, value) for arg, value in zip(fn._argtypes_[:user_arg_count], args)]
-        result = fn(*values, ctypes.byref(error))
-        if error.value == ERROR_DIVISION_BY_ZERO: raise ZeroDivisionError('division by zero')
-        if error.value == ERROR_RANGE_STEP_ZERO: raise ValueError('range() arg 3 must not be zero')
-        if error.value == ERROR_ARRAY_DIMENSION_MISMATCH:
-            raise ValueError('array index count does not match array dimensions')
-        return result
+        begin_call()
+        try:
+            error = ctypes.c_int32(0)
+            values = [wrap_arg(arg, value) for arg, value in zip(fn._argtypes_[:user_arg_count], args)]
+            result = fn(*values, ctypes.byref(error))
+            if error.value == ERROR_DIVISION_BY_ZERO: raise ZeroDivisionError('division by zero')
+            if error.value == ERROR_RANGE_STEP_ZERO: raise ValueError('range() arg 3 must not be zero')
+            if error.value == ERROR_ARRAY_DIMENSION_MISMATCH:
+                raise ValueError('array index count does not match array dimensions')
+            if error.value == ERROR_INDEX_OUT_OF_BOUNDS: raise IndexError('index out of range')
+            return to_python(result) if fn._restype_ == StringPointer else result
+        finally:
+            end_call()
     call.__name__ = fn.__name__
     return call
 
