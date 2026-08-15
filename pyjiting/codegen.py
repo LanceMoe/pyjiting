@@ -7,7 +7,7 @@ from llvmlite import ir
 
 from . import ast as core
 from .errors import CodegenError
-from .intrinsics import STRING_INTRINSICS
+from .intrinsics import STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS
 from .ll_types import mangler
 from .registry import get as get_registered, keep_callback
 from .types import (bool_t, double64_t, float32_t, int32_t, int64_t, is_array,
@@ -241,9 +241,14 @@ class LLVMCodeGen:
             if isinstance(index, core.Slice):
                 lower = self.cast(self.visit(index.lower), index.lower.type, int64_t) if index.lower else ir.Constant(ir_i64, 0)
                 upper = self.cast(self.visit(index.upper), index.upper.type, int64_t) if index.upper else ir.Constant(ir_i64, 0)
-                return self._runtime_call('slice', string_type(), [string_type(), ir_i64, ir_i64, ir_i64, ir_i64],
-                                          [value, ir.Constant(ir_i64, int(index.lower is not None)), lower,
-                                           ir.Constant(ir_i64, int(index.upper is not None)), upper])
+                step = self.cast(self.visit(index.step), index.step.type, int64_t) if index.step else ir.Constant(ir_i64, 0)
+                result = self._runtime_call(
+                    'slice', string_type(),
+                    [string_type(), ir_i64, ir_i64, ir_i64, ir_i64, ir_i64, ir_i64, ir.PointerType(ir_i32)],
+                    [value, ir.Constant(ir_i64, int(index.lower is not None)), lower,
+                     ir.Constant(ir_i64, int(index.upper is not None)), upper,
+                     ir.Constant(ir_i64, int(index.step is not None)), step, self.error_ptr])
+                self.propagate_error(); return result
             result = self._runtime_call('index', string_type(), [string_type(), ir_i64, ir.PointerType(ir_i32)],
                                         [value, self.cast(self.visit(index), index.type, int64_t), self.error_ptr])
             self.propagate_error(); return result
@@ -296,6 +301,10 @@ class LLVMCodeGen:
 
     def _compare(self, op, left, right, ty):
         if is_string(ty):
+            if op in core.MEMBERSHIP_OPS:
+                contains = self._runtime_call('contains', ir_i64, [string_type(), string_type()], [left, right])
+                present = self.builder.icmp_signed('!=', contains, ir.Constant(ir_i64, 0))
+                return self.builder.not_(present) if op == 'notin#' else present
             compared = self._runtime_call('compare', ir_i64, [string_type(), string_type()], [left, right])
             zero = ir.Constant(ir_i64, 0)
             predicates = {'eq#': '==', 'ne#': '!=', 'lt#': '<', 'le#': '<=', 'gt#': '>', 'ge#': '>='}
@@ -572,8 +581,23 @@ class LLVMCodeGen:
             if is_float(node.type): predicate = self.builder.fcmp_ordered('<=' if node.fn.id == 'min' else '>=', left, right)
             else: predicate = self.builder.icmp_signed('<=' if node.fn.id == 'min' else '>=', left, right)
             return self.builder.select(predicate, left, right)
+        if node.fn.id == 'ord':
+            result = self._runtime_call('ord', ir_i64, [string_type(), ir.PointerType(ir_i32)],
+                                        [args[0], self.error_ptr])
+            self.propagate_error(); return result
+        if node.fn.id == 'chr':
+            value = self.cast(args[0], node.args[0].type, int64_t)
+            result = self._runtime_call('chr', string_type(), [ir_i64, ir.PointerType(ir_i32)],
+                                        [value, self.error_ptr])
+            self.propagate_error(); return result
         if node.fn.id in STRING_INTRINSICS:
             name = node.fn.id[4:]
+            if node.fn.id in STRING_TRANSFORMS:
+                return self._runtime_call(name, string_type(), [string_type()], args)
+            if node.fn.id == 'str.replace':
+                return self._runtime_call(name, string_type(), [string_type()] * 3, args)
+            if node.fn.id in STRING_PREDICATES:
+                return self._runtime_call(name, ir_i64, [string_type()], args)
             return self._runtime_call(name, ir_i64, [string_type(), string_type()], args)
         if node.fn.id == self.org_func_name:
             result = self.builder.call(self.function, args + [self.error_ptr])

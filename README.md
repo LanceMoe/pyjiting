@@ -53,9 +53,9 @@ Pyjiting compiles a function to native code when it is first called. A function 
 | Scalars | Bool, Int32, Int64, Float32 and Float64; deterministic widening and fixed-width integer wraparound | `tests/test_infer.py`, `tests/test_arith.py` |
 | Arithmetic | `+ - * / // % **`, unary `-`, Python floor/mod signs, constant integer powers, NaN-aware scalar truthiness | `tests/test_arith.py` |
 | Control flow | `if`, `while`, `for range`, one-dimensional array/string iteration, `break`, `continue`, negative/dynamic steps, nested loops and loop `else` | `tests/test_control_flow.py`, `tests/test_extensions.py` |
-| Strings | Unicode arguments/literals/returns, truthiness, comparison, indexing, unit-step slicing, concat/repeat, and `len`/`startswith`/`endswith`/`find`/`count` | `tests/test_string.py` |
+| Strings | Unicode values, comparison/membership, full slicing, concat/repeat, transforms, predicates, search, and `ord`/`chr` | `tests/test_string.py`, `tests/test_string_phase2.py` |
 | Arrays | int32/int64/float32/float64 ndarrays; checked negative indexing, strided multidimensional reads/writes, shape indexing and one-dimensional iteration | `tests/test_array.py`, `tests/test_abi.py`, `tests/test_extensions.py` |
-| Intrinsics | Typed `len`, `abs`, two-argument `min` and `max` | `tests/test_extensions.py` |
+| Intrinsics | Typed `len`, `abs`, two-argument `min`/`max`, `ord`, and `chr` | `tests/test_extensions.py`, `tests/test_string_phase2.py` |
 | Annotations and callbacks | Scalar/string annotations, deferred `np.ndarray` dtype specialization, and persistent annotated `@reg` callbacks | `tests/test_parser.py`, `tests/test_reg_callback.py`, `tests/test_extensions.py` |
 | Validation | Parser source locations, inference rules and LLVM verification for generated modules | `tests/test_parser.py`, `tests/test_codegen.py` |
 
@@ -67,7 +67,7 @@ Integer arithmetic follows two's-complement fixed-width behavior. In particular,
 
 Arrays use a stable `data/ndim/shape/strides` ABI. Element reads and writes support checked negative indices and multidimensional, transposed, sliced and negative-stride NumPy views. Out-of-range element or shape indices raise `IndexError`; an index-count mismatch raises `ValueError`. Array creation, broadcasting and whole-array ufunc operations remain deliberately unsupported.
 
-Strings use a length-delimited UTF-32 ABI, so Unicode code-point indexing and embedded NUL characters are preserved. Temporary and returned strings live in a per-dispatch arena. Slicing currently accepts only an omitted step or a step of `1`.
+Strings use a length-delimited UTF-32 ABI, so Unicode code-point indexing and embedded NUL characters are preserved. Temporary and returned strings live in a per-dispatch arena. Slices support omitted, positive, negative and dynamic non-zero steps. Membership, Unicode case transforms, whitespace trimming, replacement, character predicates, `ord` and `chr` follow Python semantics within the typed subset.
 
 Each specialization uses a private LLVM symbol derived from the decorated Python function identity plus its type signature. Two functions with the same short name therefore cannot share a cached native implementation by accident.
 ## Requirements
@@ -261,7 +261,7 @@ This is a research/educational project, not a production JIT. Among others:
 - Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.
 - Registered (`@reg`) functions need supported scalar or string annotations and must not raise across the callback boundary.
 - Default, keyword-only, variadic and keyword call arguments are rejected. JIT calls accept exactly their declared positional argument count.
-- Containers, unpacking assignment, arbitrary Python objects, non-unit string slices, multidimensional array iteration and array-wide NumPy operations are unsupported.
+- Containers, unpacking assignment, arbitrary Python objects, multidimensional array iteration and array-wide NumPy operations are unsupported.
 # Special thanks
 
 Inspired by [numpile](https://dev.stephendiehl.com/numpile/) tutorial and continue to work on this basis.

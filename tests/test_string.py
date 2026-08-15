@@ -81,10 +81,20 @@ def test_string_comparison_and_queries_match_python():
     assert string_queries(value, needle) == expected
 
 
-def test_string_slice_rejects_non_unit_steps():
-    @jit
-    def unsupported(value: str) -> str:
-        return value[::2]
+@jit
+def stepped_slice(value: str, begin: int, end: int, step: int) -> str:
+    return value[begin:end:step]
 
-    with pytest.raises(InferError, match='step of 1'):
-        unsupported('abcd')
+
+@jit
+def reverse_string(value: str) -> str:
+    return value[::-1]
+
+
+def test_string_slices_support_positive_negative_and_dynamic_steps():
+    value = 'A你😀bcZ'
+    for begin, end, step in [(0, 99, 2), (-1, -99, -1), (4, 0, -2), (-5, 5, 3)]:
+        assert stepped_slice(value, begin, end, step) == value[begin:end:step]
+    assert reverse_string(value) == value[::-1]
+    with pytest.raises(ValueError, match='slice step cannot be zero'):
+        stepped_slice(value, 0, 3, 0)

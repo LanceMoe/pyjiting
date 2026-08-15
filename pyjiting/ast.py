@@ -150,6 +150,8 @@ def integer_constant_value(node):
 PRIM_OPS = {
     ast.Add: 'add#', ast.Sub: 'sub#', ast.Mult: 'mult#', ast.Div: 'div#', ast.FloorDiv: 'floordiv#', ast.Mod: 'mod#', ast.Pow: 'pow#',
     ast.Eq: 'eq#', ast.NotEq: 'ne#', ast.Lt: 'lt#', ast.LtE: 'le#', ast.Gt: 'gt#', ast.GtE: 'ge#',
+    ast.In: 'in#', ast.NotIn: 'notin#',
 }
 ARITHMETIC_OPS = {'add#', 'sub#', 'mult#', 'div#', 'floordiv#', 'mod#', 'pow#'}
 COMPARISON_OPS = {'eq#', 'ne#', 'lt#', 'le#', 'gt#', 'ge#'}
+MEMBERSHIP_OPS = {'in#', 'notin#'}

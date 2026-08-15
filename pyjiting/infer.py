@@ -1,6 +1,6 @@
 from . import ast as core
 from .errors import InferError
-from .intrinsics import STRING_INTRINSICS
+from .intrinsics import STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS
 from .types import (FuncType, bool_t, can_widen, double64_t, int64_t, is_array,
                     is_integer, is_numeric, is_string, is_truthy_type,
                     promote_numeric, shape_t, str_t, void_t)
@@ -114,8 +114,6 @@ class TypeInferencer:
                     if bound is not None: self._coerce(self.visit(bound), int64_t, bound)
                 if index.step is not None:
                     self._coerce(self.visit(index.step), int64_t, index.step)
-                    if core.integer_constant_value(index.step) != 1:
-                        raise InferError('string slices only support a step of 1', index.step)
                 setattr(index, 'type', str_t); node.type = str_t; return str_t
             self._coerce(self.visit(index), int64_t, index); node.type = str_t; return str_t
         if value_ty == shape_t:
@@ -171,6 +169,11 @@ class TypeInferencer:
         left = self.visit(node.left)
         for op, comparator in zip(node.ops, node.comparators):
             right = self.visit(comparator)
+            if op in core.MEMBERSHIP_OPS:
+                if not (is_string(left) and is_string(right)):
+                    raise InferError(f'{op} requires string operands', node)
+                left = right
+                continue
             if not (is_string(left) and is_string(right)) and promote_numeric(left, right) is None:
                 raise InferError(f'{op} requires comparable values of compatible types', node)
             left = right
@@ -234,12 +237,29 @@ class TypeInferencer:
             common = promote_numeric(arg_types[0], arg_types[1])
             if common is None: raise InferError(f'{node.fn.id} expects numeric arguments', node)
             node.operand_type = node.type = common; return common
+        if node.fn.id == 'ord':
+            if arg_types != [str_t]: raise InferError('ord expects one string argument', node)
+            node.type = int64_t; return int64_t
+        if node.fn.id == 'chr':
+            if len(arg_types) != 1 or not is_integer(arg_types[0]):
+                raise InferError('chr expects one integer argument', node)
+            node.type = str_t; return str_t
         if node.fn.id in STRING_INTRINSICS and node.fn.id in ('str.startswith', 'str.endswith'):
             if arg_types != [str_t, str_t]: raise InferError(f'{node.fn.id[4:]} expects one string argument', node)
             node.type = bool_t; return bool_t
         if node.fn.id in STRING_INTRINSICS and node.fn.id in ('str.find', 'str.count'):
             if arg_types != [str_t, str_t]: raise InferError(f'{node.fn.id[4:]} expects one string argument', node)
             node.type = int64_t; return int64_t
+        if node.fn.id in STRING_TRANSFORMS:
+            if arg_types != [str_t]: raise InferError(f'{node.fn.id[4:]} expects no arguments', node)
+            node.type = str_t; return str_t
+        if node.fn.id == 'str.replace':
+            if arg_types != [str_t, str_t, str_t]:
+                raise InferError('replace expects two string arguments', node)
+            node.type = str_t; return str_t
+        if node.fn.id in STRING_PREDICATES:
+            if arg_types != [str_t]: raise InferError(f'{node.fn.id[4:]} expects no arguments', node)
+            node.type = bool_t; return bool_t
         if node.fn.id == self.org_func_name:
             if self.return_type is None: raise InferError('recursive return type needs an earlier return', node)
             node.type = self.return_type; return node.type

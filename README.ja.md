@@ -55,9 +55,9 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 | スカラ | `bool`、`int32`、`int64`、`float32`、`float64`。決定論的な型昇格および固定幅整数のラップアラウンド | `tests/test_infer.py`、`tests/test_arith.py` |
 | 演算 | `+ - * / // % **`、単項 `-`、Python 互換の floor/mod 符号規則、定数整数べき乗、NaN を考慮した真理値判定 | `tests/test_arith.py` |
 | 制御フロー | `if`、`while`、`range`、一次元配列／文字列の反復、`break`、`continue`、ループ `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
-| 文字列 | Unicode 引数／リテラル／戻り値、真理値、比較、添字、step 1 のスライス、連結／反復、主要な検索メソッド | `tests/test_string.py` |
+| 文字列 | Unicode 値、比較／包含判定、完全なスライス、連結／反復、変換、文字種判定、検索、`ord`／`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
 | 配列 | 4 種の数値 dtype、境界検査付き負添字、ストライド付き多次元読み書き、shape 添字、一次元反復 | `tests/test_array.py`、`tests/test_abi.py`、`tests/test_extensions.py` |
-| 組み込み関数 | 静的型付き `len`、`abs`、2 引数の `min`／`max` | `tests/test_extensions.py` |
+| 組み込み関数 | 静的型付き `len`、`abs`、2 引数の `min`／`max`、`ord`、`chr` | `tests/test_extensions.py`、`tests/test_string_phase2.py` |
 | アノテーションとコールバック | スカラ／文字列アノテーション、`np.ndarray` dtype の遅延特化、型注釈付き `@reg` | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 検証 | パーサのソース位置保持、推論ルール検証、生成された LLVM モジュールのバリデーション | `tests/test_parser.py`、`tests/test_codegen.py` |
 
@@ -69,7 +69,7 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 
 配列は安定した `data/ndim/shape/strides` ABI を採用します。要素と shape の負添字および境界検査に対応し、範囲外は `IndexError`、添字数の不一致は `ValueError` になります。配列生成、ブロードキャスト、配列全体の ufunc は未対応です。
 
-文字列は長さ付き UTF-32 ABI を使用し、Unicode コードポイントと埋め込み NUL を保持します。一時値と戻り値は呼び出し単位の arena で管理され、スライスの step は省略または `1` のみ対応します。
+文字列は長さ付き UTF-32 ABI を使用し、Unicode コードポイントと埋め込み NUL を保持します。一時値と戻り値は呼び出し単位の arena で管理されます。スライスは省略、正、負、動的な非ゼロ step に対応し、包含判定、Unicode 大小文字変換、空白除去、置換、文字種判定、`ord`／`chr` は静的サブセット内で Python の意味論に従います。
 
 各特化コードは、デコレートされた Python 関数の識別情報（identity）と型シグネチャから生成される一意の LLVM シンボルを使用します。そのため、同じ関数名を持つ別々の関数が誤ってキャッシュを共有してしまうことはありません。
 
@@ -270,7 +270,7 @@ pyjiting/
 * 整数のべき乗（`**`）は、指数部がコンパイル時定数である必要があります（動的な負の指数は静的に戻り型を一意に決定できないため）。
 * `@reg` 関数はサポート対象のスカラ型または文字列型アノテーションを完全に備える必要があり、コールバック境界を跨いで例外を投げることはできません。
 * デフォルト引数、キーワード専用引数、可変長引数（`*args`, `**kwargs`）、キーワード引数による呼び出しはサポートしていません。JIT 関数の呼び出しは、宣言された位置引数の数と厳密に一致する必要があります。
-* 組み込みコンテナ、アンパック代入、任意の Python オブジェクト、step が 1 以外の文字列スライス、NumPy 配列全体のベクトル演算は未対応です。
+* 組み込みコンテナ、アンパック代入、任意の Python オブジェクト、多次元配列の直接反復、NumPy 配列全体のベクトル演算は未対応です。
 
 # 謝辞
 

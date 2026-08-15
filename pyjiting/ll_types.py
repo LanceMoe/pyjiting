@@ -14,6 +14,9 @@ ERROR_DIVISION_BY_ZERO = 1
 ERROR_RANGE_STEP_ZERO = 2
 ERROR_ARRAY_DIMENSION_MISMATCH = 3
 ERROR_INDEX_OUT_OF_BOUNDS = 4
+ERROR_SLICE_STEP_ZERO = 5
+ERROR_ORD_LENGTH = 6
+ERROR_CHR_RANGE = 7
 
 
 _scalar_ctypes = {1: ctypes.c_int8, 8: ctypes.c_int8, 16: ctypes.c_int16, 32: ctypes.c_int32, 64: ctypes.c_int64}
@@ -83,6 +86,9 @@ def dispatcher(fn, user_arg_count):
             if error.value == ERROR_ARRAY_DIMENSION_MISMATCH:
                 raise ValueError('array index count does not match array dimensions')
             if error.value == ERROR_INDEX_OUT_OF_BOUNDS: raise IndexError('index out of range')
+            if error.value == ERROR_SLICE_STEP_ZERO: raise ValueError('slice step cannot be zero')
+            if error.value == ERROR_ORD_LENGTH: raise TypeError('ord() expected a character')
+            if error.value == ERROR_CHR_RANGE: raise ValueError('chr() arg not in range(0x110000)')
             return to_python(result) if fn._restype_ == StringPointer else result
         finally:
             end_call()
