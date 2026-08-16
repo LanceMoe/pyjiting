@@ -3,7 +3,7 @@ import gc
 import numpy as np
 import pytest
 
-from pyjiting import jit, reg
+from pyjiting import jit, reg, runtime_stats
 
 
 @reg
@@ -41,11 +41,13 @@ def callback_failure(value):
 
 
 def test_registered_callbacks_use_their_annotations_and_survive_gc():
+    before = runtime_stats()['registered_callback_calls']['total']
     assert callback_float(np.float32(1.25)) == np.float32(1.5625)
     gc.collect()
     assert callback_float(np.float32(2.0)) == np.float32(4.0)
     assert callback_bool(True) == 7
     assert callback_bool(False) == 3
+    assert runtime_stats()['registered_callback_calls']['total'] == before + 4
 
 
 def test_registered_callback_exception_is_reraised_and_stops_native_execution():

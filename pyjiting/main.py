@@ -8,7 +8,7 @@ import inspect
 import itertools
 import sys
 import threading
-from time import perf_counter_ns
+from time import perf_counter_ns, time_ns
 from types import MappingProxyType
 from typing import Any, Callable, ParamSpec, TypeVar, overload
 import warnings
@@ -18,12 +18,13 @@ import numpy as np
 from llvmlite import ir
 
 from .codegen import LLVMCodeGen
-from .errors import (CompileError, InferError, RuntimeClosedError,
+from .errors import (CodegenError, CompileError, FallbackWarning, InferError, RuntimeClosedError,
                      RuntimeResourceError, SpecializationLimitError)
 from .infer import TypeInferencer
 from .ll_types import mangler, wrap_module
 from .parser import ASTVisitor
-from .registry import (callback_count, get as get_registered, register,
+from .registry import (callback_count, callback_stats as registered_callback_stats,
+                       get as get_registered, register, unregister,
                        registration_id, signatures)
 from .string_runtime import callback_stats, literal_count
 from .types import (TupleType, bool_t, contains_array, double64_t, float32_t,
@@ -32,6 +33,8 @@ from .types import (TupleType, bool_t, contains_array, double64_t, float32_t,
 
 DEFAULT_MAX_SPECIALIZATIONS = 64
 DEBUG = False
+P = ParamSpec('P')
+R = TypeVar('R')
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 
@@ -54,14 +57,16 @@ class RuntimeState:
         self.retained_modules = []
         self.runtime_counters = {
             'compile_hits': 0, 'compile_misses': 0, 'compile_failures': 0,
-            'failure_cache_hits': 0,
+            'failure_cache_hits': 0, 'compile_waits': 0,
         }
         self.specialization_metrics = {}
         self.specialization_ir = {}
         self.failure_cache = {}
+        self.failure_details = {}
         self.max_specializations = max_specializations
         self.max_modules = max_modules
         self.closed = False
+        self.registered_functions = []
         self.target_machine = llvm.Target.from_default_triple().create_target_machine()
         self.engine = llvm.create_mcjit_compiler(llvm.parse_assembly(''), self.target_machine)
 
@@ -96,7 +101,8 @@ def validate_specialization_limit(value):
         raise ValueError('max_specializations must be a positive integer or None')
 
 
-def reg(fn): return register(fn)
+def reg(fn: Callable[P, R]) -> Callable[P, R]:
+    return register(fn)
 
 
 def arg_pytype(arg):
@@ -189,6 +195,7 @@ def compile_specialization(tree, arg_types):
             compilation = state.compilation_states[key]
             if compilation['owner'] == owner:
                 raise InferError('mutual recursion is not supported by the current MCJIT backend', tree)
+            state.runtime_counters['compile_waits'] += 1
             compilation['condition'].wait()
             if key in state.function_cache:
                 state.runtime_counters['compile_hits'] += 1
@@ -202,13 +209,16 @@ def compile_specialization(tree, arg_types):
             raise error_type(*error_args)
         maximum = getattr(tree, 'max_specializations', DEFAULT_MAX_SPECIALIZATIONS)
         existing = sum(1 for cached_key in state.function_cache if cached_key[0] == key[0])
-        if maximum is not None and existing >= maximum:
+        pending = sum(1 for pending_key in state.compilation_states if pending_key[0] == key[0])
+        if maximum is not None and existing + pending >= maximum:
             raise SpecializationLimitError(
                 f'{tree.fname} reached its specialization limit ({maximum})', tree)
-        if state.max_specializations is not None and len(state.function_cache) >= state.max_specializations:
+        reserved = len(state.function_cache) + len(state.compilation_states)
+        if state.max_specializations is not None and reserved >= state.max_specializations:
             raise RuntimeResourceError(
                 f'JIT runtime reached its specialization limit ({state.max_specializations})')
-        if state.max_modules is not None and len(state.retained_modules) >= state.max_modules:
+        reserved_modules = len(state.retained_modules) + len(state.compilation_states)
+        if state.max_modules is not None and reserved_modules >= state.max_modules:
             raise RuntimeResourceError(f'JIT runtime reached its module limit ({state.max_modules})')
         state.runtime_counters['compile_misses'] += 1
         condition = threading.Condition(state.cache_lock)
@@ -265,6 +275,7 @@ def compile_specialization(tree, arg_types):
                 'return_type': str(function_type.return_type),
                 'native_symbol': symbol,
                 'compile_time_ns': perf_counter_ns() - started_ns,
+                'compile_count': 1,
                 'generation': generation,
                 'calls': 0,
             }
@@ -280,24 +291,51 @@ def compile_specialization(tree, arg_types):
                 state.function_signatures.pop(key, None)
             if isinstance(error, CompileError) and not isinstance(error, SpecializationLimitError):
                 state.failure_cache[key] = (type(error), error.args)
+                state.failure_details[key] = {
+                    'function': tree.fname,
+                    'argument_types': tuple(map(str, arg_types)),
+                    'stage': ('codegen' if isinstance(error, CodegenError) else
+                              'inference' if isinstance(error, InferError) else 'frontend'),
+                    'error_type': type(error).__name__,
+                    'message': str(error),
+                    'timestamp_ns': time_ns(),
+                }
             compilation = state.compilation_states.pop(key, None)
             if compilation is not None:
                 compilation['condition'].notify_all()
         raise
 
 
-def _wrapper_for_tree(tree, fn=None, fallback=False, max_specializations=DEFAULT_MAX_SPECIALIZATIONS):
+def fallback_reason(error):
+    if isinstance(error, CodegenError): return 'codegen'
+    if isinstance(error, InferError): return 'inference'
+    return 'frontend'
+
+
+def validate_fallback_warning(value):
+    if value not in ('once', 'always', 'ignore'):
+        raise ValueError("fallback_warning must be 'once', 'always', or 'ignore'")
+
+
+def emit_fallback_warning(policy, warned, function, error, *, stacklevel):
+    if policy != 'ignore' and (policy == 'always' or not warned):
+        warnings.warn(
+            FallbackWarning(function, fallback_reason(error), error), stacklevel=stacklevel)
+    return warned or policy != 'ignore'
+
+
+def _wrapper_for_tree(tree, fn=None, fallback=False, max_specializations=DEFAULT_MAX_SPECIALIZATIONS,
+                      fallback_warning='once'):
     validate_specialization_limit(max_specializations)
+    validate_fallback_warning(fallback_warning)
     tree.max_specializations = max_specializations
     ensure_compilation_unit(tree)
     warned = False
 
     def warn_fallback(error):
         nonlocal warned
-        if not warned:
-            warnings.warn(f'pyjiting fallback for {tree.fname}: {error}',
-                          RuntimeWarning, stacklevel=3)
-            warned = True
+        warned = emit_fallback_warning(
+            fallback_warning, warned, tree.fname, error, stacklevel=3)
 
     signature = inspect.signature(fn) if fn is not None else None
     if signature is not None:
@@ -368,33 +406,16 @@ def _wrapper_for_tree(tree, fn=None, fallback=False, max_specializations=DEFAULT
     return wrapper
 
 
-P = ParamSpec('P')
-R = TypeVar('R')
-
-
-@overload
-def jit(fn: Callable[P, R], *, fallback: bool = False,
-        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS) -> Callable[P, R]: ...
-
-
-@overload
-def jit(fn: None = None, *, fallback: bool = False,
-        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS
-        ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
-
-
-@overload
-def jit(fn: str, *, fallback: bool = False,
-        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS) -> Any: ...
-
-
 def _jit_with_state(state, fn: Any = None, *, fallback: bool = False,
-                    max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS) -> Any:
+                    max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS,
+                    fallback_warning: str = 'once') -> Any:
     state.ensure_open()
     validate_specialization_limit(max_specializations)
+    validate_fallback_warning(fallback_warning)
     if fn is None:
         return lambda decorated: _jit_with_state(
-            state, decorated, fallback=fallback, max_specializations=max_specializations)
+            state, decorated, fallback=fallback, max_specializations=max_specializations,
+            fallback_warning=fallback_warning)
     try:
         tree = ASTVisitor()(fn)
     except CompileError as error:
@@ -406,10 +427,8 @@ def _jit_with_state(state, fn: Any = None, *, fallback: bool = False,
         @functools.wraps(fn)
         def fallback_wrapper(*args, **kwargs):
             nonlocal warned
-            if not warned:
-                warnings.warn(f'pyjiting fallback for {fn.__qualname__}: {fallback_error}',
-                              RuntimeWarning, stacklevel=2)
-                warned = True
+            warned = emit_fallback_warning(
+                fallback_warning, warned, fn.__qualname__, fallback_error, stacklevel=2)
             return fn(*args, **kwargs)
 
         return fallback_wrapper
@@ -418,13 +437,32 @@ def _jit_with_state(state, fn: Any = None, *, fallback: bool = False,
     tree.symbol = 'jit_' + hashlib.sha256(identity).hexdigest()[:16]
     tree.namespace = fn.__globals__
     tree.runtime_state = state
-    return _wrapper_for_tree(tree, fn, fallback, max_specializations)
+    return _wrapper_for_tree(tree, fn, fallback, max_specializations, fallback_warning)
+
+
+@overload
+def jit(fn: Callable[P, R], *, fallback: bool = False,
+        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS,
+        fallback_warning: str = 'once') -> Callable[P, R]: ...
+
+
+@overload
+def jit(fn: None = None, *, fallback: bool = False,
+        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS, fallback_warning: str = 'once'
+        ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
+
+@overload
+def jit(fn: str, *, fallback: bool = False,
+        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS,
+        fallback_warning: str = 'once') -> Any: ...
 
 
 def jit(fn: Any = None, *, fallback: bool = False,
-        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS) -> Any:
+        max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS,
+        fallback_warning: str = 'once') -> Any:
     return _jit_with_state(default_runtime, fn, fallback=fallback,
-                           max_specializations=max_specializations)
+                           max_specializations=max_specializations, fallback_warning=fallback_warning)
 
 
 def _jit_from_source_with_state(state, source, *, namespace=None,
@@ -465,6 +503,11 @@ def runtime_stats(function=None):
                 'compile_time_ns': sum(state.specialization_metrics[key]['compile_time_ns'] for key in keys),
                 'calls': sum(state.specialization_metrics[key]['calls'] for key in keys),
                 'signatures': tuple(MappingProxyType(dict(state.specialization_metrics[key])) for key in keys),
+                'failures': tuple(
+                    MappingProxyType(dict(details))
+                    for key, details in state.failure_details.items()
+                    if key[0] == unit_id
+                ),
             }
         return {
             'specializations': len(state.function_cache),
@@ -472,8 +515,13 @@ def runtime_stats(function=None):
             'retained_modules': len(state.retained_modules),
             'closed': state.closed,
             'registered_callbacks': callback_count(),
+            'registered_callback_calls': registered_callback_stats(),
             'string_literals': literal_count(),
             'string_callbacks': callback_stats(),
+            'recent_failures': tuple(
+                MappingProxyType(dict(details))
+                for details in state.failure_details.values()
+            ),
             **state.runtime_counters,
         }
 
@@ -500,6 +548,7 @@ def clear_cache(function=None):
             state.specialization_metrics.pop(key, None)
             state.specialization_ir.pop(key, None)
             state.failure_cache.pop(key, None)
+            state.failure_details.pop(key, None)
             state.specialization_generations[key] = state.specialization_generations.get(key, 0) + 1
         return len(targets)
 
@@ -528,9 +577,11 @@ class JITContext:
             max_specializations=max_specializations, max_modules=max_modules)
 
     def jit(self, fn=None, *, fallback: bool = False,
-            max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS):
+            max_specializations: int | None = DEFAULT_MAX_SPECIALIZATIONS,
+            fallback_warning: str = 'once'):
         return _jit_with_state(self._state, fn, fallback=fallback,
-                               max_specializations=max_specializations)
+                               max_specializations=max_specializations,
+                               fallback_warning=fallback_warning)
 
     def from_source(self, source, *, namespace=None,
                     max_specializations=DEFAULT_MAX_SPECIALIZATIONS):
@@ -540,7 +591,9 @@ class JITContext:
 
     def reg(self, fn):
         self._state.ensure_open()
-        return register(fn)
+        registered = register(fn)
+        self._state.registered_functions.append(registered)
+        return registered
 
     def stats(self):
         with self._state.cache_lock:
@@ -561,6 +614,10 @@ class JITContext:
             self._state.specialization_metrics.clear()
             self._state.specialization_ir.clear()
             self._state.failure_cache.clear()
+            self._state.failure_details.clear()
+            for function in self._state.registered_functions:
+                unregister(function)
+            self._state.registered_functions.clear()
         return None
 
     def __enter__(self):

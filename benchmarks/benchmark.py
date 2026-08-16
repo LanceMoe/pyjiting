@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import platform
 import statistics
 import sys
@@ -11,7 +12,7 @@ from time import perf_counter_ns
 import llvmlite
 import numpy as np
 
-from pyjiting import clear_cache, jit
+from pyjiting import clear_cache, jit, runtime_stats
 
 
 @jit
@@ -32,6 +33,16 @@ def modular_sum_python(limit):
 @jit
 def strided_sum(values):
     return sum(values)
+
+
+@jit
+def native_string_index(value, index):
+    return value[index]
+
+
+@jit
+def runtime_string_upper(value):
+    return value.upper()
 
 
 def measure(function, repeat, expected=None):
@@ -69,6 +80,20 @@ def run(repeat):
     array_warm = measure(lambda: strided_sum(values), repeat, expected_array)
     numpy = measure(lambda: np.sum(values), repeat, expected_array)
 
+    text = 'Pyjiting-你好-🙂' * 200
+    clear_cache(native_string_index)
+    native_string_cold = measure(lambda: native_string_index(text, -1), 1, '🙂')
+    native_string_warm = measure(lambda: native_string_index(text, -1), repeat, '🙂')
+    clear_cache(runtime_string_upper)
+    callbacks_before = runtime_stats()['string_callbacks'].get('upper', 0)
+    runtime_string_cold = measure(lambda: runtime_string_upper(text), 1, text.upper())
+    runtime_string_warm = measure(lambda: runtime_string_upper(text), repeat, text.upper())
+    callback_delta = runtime_stats()['string_callbacks'].get('upper', 0) - callbacks_before
+
+    cold_overhead = max(0, cold['median_ns'] - warm['median_ns'])
+    warm_saving = python['median_ns'] - warm['median_ns']
+    break_even = math.ceil(cold_overhead / warm_saving) if warm_saving > 0 else None
+
     return {
         'environment': {
             'python': sys.version.split()[0],
@@ -78,6 +103,8 @@ def run(repeat):
             'numpy': np.__version__,
         },
         'repeat': repeat,
+        'break_even_calls': {'scalar_vs_cpython': break_even},
+        'runtime_callbacks': {'string_upper': callback_delta},
         'cases': {
             'scalar_cold': cold,
             'scalar_warm': warm,
@@ -85,6 +112,10 @@ def run(repeat):
             'strided_array_cold': array_cold,
             'strided_array_warm': array_warm,
             'strided_array_numpy': numpy,
+            'native_string_index_cold': native_string_cold,
+            'native_string_index_warm': native_string_warm,
+            'runtime_string_upper_cold': runtime_string_cold,
+            'runtime_string_upper_warm': runtime_string_warm,
         },
     }
 
@@ -98,8 +129,13 @@ def main():
         parser.error('--repeat must be at least 2')
     report = run(args.repeat)
     for name, result in report['cases'].items():
+        displayed = ascii(result['result'])
+        if len(displayed) > 96:
+            displayed = displayed[:93] + '...'
         print(f"{name}: median={result['median_ns'] / 1e6:.3f} ms "
-              f"min={result['min_ns'] / 1e6:.3f} ms result={result['result']}")
+              f"min={result['min_ns'] / 1e6:.3f} ms result={displayed}")
+    print(f"scalar break-even calls: {report['break_even_calls']['scalar_vs_cpython']}")
+    print(f"string upper runtime callbacks: {report['runtime_callbacks']['string_upper']}")
     if args.json:
         args.json.write_text(json.dumps(report, indent=2), encoding='utf-8')
 

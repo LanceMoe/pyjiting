@@ -3,7 +3,8 @@ import warnings
 import pytest
 
 from pyjiting import jit, jit_from_source
-from pyjiting.errors import CompileError, InferError
+from pyjiting.errors import (CompileError, FallbackWarning, InferError,
+                             SpecializationLimitError)
 
 
 def test_explicit_source_entrypoint_compiles_dynamic_functions():
@@ -36,6 +37,64 @@ def test_fallback_mode_runs_the_original_function_and_warns_once():
 
     assert len(captured) == 1
     assert 'pyjiting fallback' in str(captured[0].message)
+    assert isinstance(captured[0].message, FallbackWarning)
+    assert captured[0].message.reason == 'frontend'
+
+
+def test_fallback_warning_policy_is_configurable():
+    namespace = {'__name__': 'dynamic_test'}
+    exec('def generated(value):\n    return [value]', namespace)
+    fallback = jit(namespace['generated'], fallback=True, fallback_warning='ignore')
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter('always')
+        assert fallback(3) == [3]
+    assert captured == []
+
+    with pytest.raises(ValueError, match='fallback_warning'):
+        jit(namespace['generated'], fallback=True, fallback_warning='invalid')
+
+
+def test_fallback_warning_always_reports_each_decoration_time_fallback():
+    namespace = {'__name__': 'dynamic_test'}
+    exec('def generated(value):\n    return [value]', namespace)
+    fallback = jit(namespace['generated'], fallback=True, fallback_warning='always')
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter('always')
+        assert fallback(3) == [3]
+        assert fallback(4) == [4]
+
+    assert len(captured) == 2
+    assert all(isinstance(item.message, FallbackWarning) for item in captured)
+
+
+def test_inference_fallback_has_structured_reason_and_honors_always_policy():
+    @jit(fallback=True, fallback_warning='always')
+    def mixed_return(value):
+        if value > 0:
+            return value
+        return 'negative'
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter('always')
+        assert mixed_return(3) == 3
+        assert mixed_return(4) == 4
+
+    assert len(captured) == 2
+    for item in captured:
+        assert isinstance(item.message, FallbackWarning)
+        assert item.message.reason == 'inference'
+        assert item.message.error_type == 'InferError'
+
+
+def test_fallback_does_not_bypass_specialization_limit():
+    @jit(fallback=True, max_specializations=1)
+    def identity(value):
+        return value
+
+    assert identity(3) == 3
+    with pytest.raises(SpecializationLimitError, match='specialization limit'):
+        identity(3.5)
 
 
 def test_unannotated_mutual_recursion_reports_a_compilation_error():

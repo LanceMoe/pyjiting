@@ -11,7 +11,7 @@ from .errors import CodegenError
 from .intrinsics import (MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES,
                          STRING_TRANSFORMS)
 from .ll_types import mangler
-from .registry import get as get_registered, keep_callback
+from .registry import get as get_registered, keep_callback, record_callback
 from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
                     is_array, is_float, is_integer, is_string, is_tuple, shape_t,
                     str_t, void_t)
@@ -389,8 +389,7 @@ class LLVMCodeGen:
                     'contains', ir_i64, [string_type(), string_type()], [left, right])
                 present = self.builder.icmp_signed('!=', contains, ir.Constant(ir_i64, 0))
                 return self.builder.not_(present) if op == 'notin#' else present
-            compared = self._checked_runtime_call(
-                'compare', ir_i64, [string_type(), string_type()], [left, right])
+            compared = self._native_string_compare(left, right)
             zero = ir.Constant(ir_i64, 0)
             predicates = {'eq#': '==', 'ne#': '!=', 'lt#': '<', 'le#': '<=', 'gt#': '>', 'ge#': '>='}
             return self.builder.icmp_signed(predicates[op], compared, zero)
@@ -400,6 +399,55 @@ class LLVMCodeGen:
             return self.builder.fcmp_ordered(predicates[op], left, right)
         predicates = {'eq#': '==', 'ne#': '!=', 'lt#': '<', 'le#': '<=', 'gt#': '>', 'ge#': '>='}
         return self.builder.icmp_signed(predicates[op], left, right)
+
+    def _native_string_compare(self, left, right):
+        zero32 = ir.Constant(ir_i32, 0)
+        data_index = ir.Constant(ir_i32, 0)
+        length_index = ir.Constant(ir_i32, 1)
+        left_data = self.builder.load(self.builder.gep(left, [zero32, data_index]))
+        right_data = self.builder.load(self.builder.gep(right, [zero32, data_index]))
+        left_length = self.builder.load(self.builder.gep(left, [zero32, length_index]))
+        right_length = self.builder.load(self.builder.gep(right, [zero32, length_index]))
+        minimum = self.builder.select(
+            self.builder.icmp_signed('<', left_length, right_length), left_length, right_length)
+        index_ptr = self.builder.alloca(ir_i64, name=f'string_compare_index_{self.counter}')
+        result_ptr = self.builder.alloca(ir_i64, name=f'string_compare_result_{self.counter}')
+        self.counter += 1
+        self.builder.store(ir.Constant(ir_i64, 0), index_ptr)
+        self.builder.store(ir.Constant(ir_i64, 0), result_ptr)
+        test = self.new_block('string_compare_test')
+        body = self.new_block('string_compare_body')
+        different = self.new_block('string_compare_different')
+        advance = self.new_block('string_compare_advance')
+        lengths = self.new_block('string_compare_lengths')
+        done = self.new_block('string_compare_done')
+        self.builder.branch(test)
+        self.set_block(test)
+        index = self.builder.load(index_ptr)
+        self.builder.cbranch(self.builder.icmp_signed('<', index, minimum), body, lengths)
+        self.set_block(body)
+        left_codepoint = self.builder.load(self.builder.gep(left_data, [index]))
+        right_codepoint = self.builder.load(self.builder.gep(right_data, [index]))
+        self.builder.cbranch(
+            self.builder.icmp_unsigned('!=', left_codepoint, right_codepoint), different, advance)
+        self.set_block(different)
+        order = self.builder.select(
+            self.builder.icmp_unsigned('<', left_codepoint, right_codepoint),
+            ir.Constant(ir_i64, -1), ir.Constant(ir_i64, 1))
+        self.builder.store(order, result_ptr)
+        self.builder.branch(done)
+        self.set_block(advance)
+        self.builder.store(self.builder.add(index, ir.Constant(ir_i64, 1)), index_ptr)
+        self.builder.branch(test)
+        self.set_block(lengths)
+        length_order = self.builder.select(
+            self.builder.icmp_signed('<', left_length, right_length), ir.Constant(ir_i64, -1),
+            self.builder.select(self.builder.icmp_signed('>', left_length, right_length),
+                                ir.Constant(ir_i64, 1), ir.Constant(ir_i64, 0)))
+        self.builder.store(length_order, result_ptr)
+        self.builder.branch(done)
+        self.set_block(done)
+        return self.builder.load(result_ptr)
 
     def visit_Compare(self, node):
         left, left_ty = self.visit(node.left), node.left.type
@@ -737,6 +785,7 @@ class LLVMCodeGen:
         def bridge(*bridge_values):
             values, error = bridge_values[:-1], bridge_values[-1]
             try:
+                record_callback(registered_identifier)
                 python_values = [to_python(value) if ty == str_t else value for value, ty in zip(values, signature.args)]
                 result = fn(*python_values)
                 if signature.return_type == str_t:

@@ -9,6 +9,7 @@ from .types import FuncType, bool_t, double64_t, float32_t, int32_t, int64_t, st
 _registered = {}
 _registered_names = {}
 _callbacks = {}
+_callback_invocations = {}
 _registration_ids = itertools.count(1)
 
 
@@ -40,6 +41,28 @@ def register(fn):
     return fn
 
 
+def unregister(fn):
+    identifier = registration_id(fn)
+    if identifier is None:
+        raise TypeError('unregister expects an @reg function')
+    registered = _registered.pop(identifier, None)
+    if registered is None:
+        return False
+    name = registered[0].__name__
+    ids = _registered_names.get(name, [])
+    if identifier in ids:
+        ids.remove(identifier)
+    if not ids:
+        _registered_names.pop(name, None)
+    _callbacks.pop(identifier, None)
+    _callback_invocations.pop(identifier, None)
+    try:
+        del fn.__pyjiting_registered_id__
+    except AttributeError:
+        pass
+    return True
+
+
 def signatures():
     """Return legacy unambiguous short-name signatures for source-only callers."""
     return {
@@ -67,3 +90,14 @@ def keep_callback(identifier, callback):
 
 def callback_count():
     return len(_callbacks)
+
+
+def record_callback(identifier):
+    _callback_invocations[identifier] = _callback_invocations.get(identifier, 0) + 1
+
+
+def callback_stats():
+    return {
+        'total': sum(_callback_invocations.values()),
+        'by_registration': dict(_callback_invocations),
+    }

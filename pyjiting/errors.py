@@ -29,3 +29,13 @@ class RuntimeClosedError(RuntimeError):
 
 class RuntimeResourceError(RuntimeError):
     """Raised when a JIT runtime resource budget is exhausted."""
+
+
+class FallbackWarning(RuntimeWarning):
+    """Reports a deliberate fallback to the original Python function."""
+
+    def __init__(self, function, reason, error):
+        self.function = function
+        self.reason = reason
+        self.error_type = type(error).__name__
+        super().__init__(f'pyjiting fallback for {function} ({reason}): {error}')

@@ -80,7 +80,11 @@ Tuple 是不可变的固定长度结构类型，元素类型会进入特化签�
 
 每个特化版本均使用由 Python 函数本体（Identity）及其类型签名派生出的独立 LLVM 符号。因此，即使存在同名的不同函数，也不会发生错误的本地缓存共享。
 
-普通 `@jit` wrapper 通过原 Python 签名支持位置/关键字混合调用和不可变默认参数。`compiled.specialize(*args)` 可以只编译而不执行；`runtime_stats(compiled)`、`inspect_specializations(compiled)` 和 `get_llvm_ir(compiled, *args)` 分别提供函数级指标、特化列表和开发诊断 IR。`JITContext` 为 Notebook 和长期服务提供独立 engine、模块/特化预算及显式关闭语义。复杂 Unicode 转换仍会进入 Python 字符串 runtime；`runtime_stats()['string_callbacks']` 可观察这些跨界调用。
+普通 `@jit` wrapper 通过原 Python 签名支持位置/关键字混合调用和不可变默认参数。`compiled.specialize(*args)` 可以只编译而不执行；`runtime_stats(compiled)`、`inspect_specializations(compiled)` 和 `get_llvm_ir(compiled, *args)` 分别提供函数级指标、特化列表和开发诊断 IR。统计包含编译等待、每个签名的编译次数、轻量失败详情、字符串 runtime 调用和注册回调调用。`JITContext` 为 Notebook 和长期服务提供独立 engine、模块/特化预算、显式关闭语义，并清理通过该 context 注册的回调。
+
+启用 `fallback=True` 时，前端、类型推断或 codegen 不支持的路径会执行原 Python 函数。`FallbackWarning` 提供 `function`、`reason` 和 `error_type` 字段；`fallback_warning` 可设为默认的 `"once"`、`"always"` 或 `"ignore"`。函数特化上限、context 资源上限、已关闭 runtime 和 LLVM 内部错误绝不会回退。字符串索引和比较使用原生 UTF-32 路径；`upper()`、`lower()` 等复杂 Unicode 转换仍进入 Python 字符串 runtime，并可通过 `runtime_stats()['string_callbacks']` 观察。
+
+需要生成数组结果的 kernel 应由调用者传入 output，而不是返回内部 descriptor，参见 `examples/example_array_output.py`。shape/dtype 必须兼容且 output 必须可写；独立输出、精确 in-place 和共享 base 的不重叠 view 受支持。部分重叠输入/输出 view 不在契约内，因为顺序写入可能改变后续读取。
 
 ## 环境要求
 

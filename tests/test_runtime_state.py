@@ -63,7 +63,15 @@ def test_deterministic_compilation_failures_are_cached_and_clearable():
     after = runtime_stats()
     assert after['compile_failures'] == before + 1
     assert after['failure_cache_hits'] >= 1
+    details = runtime_stats(invalid)['failures'][0]
+    assert details['function'] == 'invalid'
+    assert details['argument_types'] == ('Int64',)
+    assert details['stage'] == 'inference'
+    assert details['error_type'] == 'InferError'
+    with pytest.raises(TypeError):
+        details['message'] = 'changed'
     assert clear_cache(invalid) == 1
+    assert runtime_stats(invalid)['failures'] == ()
     with pytest.raises(InferError, match='not registered'):
         invalid(3)
     assert runtime_stats()['compile_failures'] == before + 2

@@ -80,7 +80,11 @@ Tuple は不変の固定長構造型で、要素型は特化シグネチャと�
 
 各特化コードは、デコレートされた Python 関数の識別情報（identity）と型シグネチャから生成される一意の LLVM シンボルを使用します。そのため、同じ関数名を持つ別々の関数が誤ってキャッシュを共有してしまうことはありません。
 
-通常の `@jit` wrapper は元の Python シグネチャを使って位置／キーワード混在呼び出しと不変なデフォルト引数を扱えます。`compiled.specialize(*args)` は実行せずにコンパイルし、`runtime_stats(compiled)`、`inspect_specializations(compiled)`、`get_llvm_ir(compiled, *args)` は関数単位の統計、特化一覧、診断用 IR を提供します。`JITContext` は Notebook や長時間プロセス向けに独立 engine、module/specialization 予算、明示的な close を提供します。複雑な Unicode 変換は Python runtime を呼び出し、その回数は `runtime_stats()['string_callbacks']` で確認できます。
+通常の `@jit` wrapper は元の Python シグネチャを使って位置／キーワード混在呼び出しと不変なデフォルト引数を扱えます。`compiled.specialize(*args)` は実行せずにコンパイルし、`runtime_stats(compiled)`、`inspect_specializations(compiled)`、`get_llvm_ir(compiled, *args)` は関数単位の統計、特化一覧、診断用 IR を提供します。統計にはコンパイル待機、シグネチャごとのコンパイル回数、軽量な失敗情報、文字列 runtime 呼び出し、登録 callback 呼び出しが含まれます。`JITContext` は Notebook や長時間プロセス向けに独立 engine、module/specialization 予算、明示的な close、およびその context で登録した callback の解放を提供します。
+
+`fallback=True` では frontend、型推論、codegen が未対応の経路だけ元の Python 関数を実行します。`FallbackWarning` は `function`、`reason`、`error_type` を公開し、`fallback_warning` は既定の `"once"`、`"always"`、`"ignore"` から選べます。関数の特化上限、context のリソース上限、close 済み runtime、LLVM 内部エラーは fallback しません。文字列の index と比較はネイティブ UTF-32 経路です。`upper()`、`lower()` など複雑な Unicode 変換は引き続き Python runtime を呼び、その回数は `runtime_stats()['string_callbacks']` で確認できます。
+
+配列結果を生成する kernel では内部 descriptor を返さず、呼び出し側が所有する output 配列を渡してください。`examples/example_array_output.py` を参照してください。shape/dtype の互換性と書き込み可能な output が必要です。独立 output、完全な in-place、同じ base を共有する非重複 view をサポートします。部分的に重なる input/output view は、順次書き込みが後続読み取りを変えるため契約外です。
 
 ## 動作要件
 

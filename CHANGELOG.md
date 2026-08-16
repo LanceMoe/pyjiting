@@ -10,6 +10,8 @@ All notable changes to Pyjiting are documented in this file.
 - Added explicit specialization warmup, per-function statistics, specialization
   inspection and LLVM IR diagnostics.
 - Preserved decorated callable types through `ParamSpec` overloads.
+- Added structured fallback warnings with configurable once/always/ignore policies,
+  while keeping resource and internal runtime failures non-fallbackable.
 
 ### Runtime
 
@@ -17,14 +19,20 @@ All notable changes to Pyjiting are documented in this file.
   budgets.
 - Added deterministic compilation-failure caching and observable string runtime
   callback counters.
+- Added compile-wait, registered-callback and lightweight failure-detail statistics.
+- Made context resource budgets atomic across in-flight compilations and released
+  context-owned registered callbacks on close.
+- Lowered Unicode string comparisons to native UTF-32 lexicographic loops.
 - Added multidimensional whole-array `sum`, `any` and `all` over arbitrary NumPy
   strides.
 
 ### Quality
 
 - Added repeatable cold/warm benchmarks with JSON output and NumPy comparisons.
+- Added scalar break-even reporting and separate native/runtime string benchmark cases.
 - Added Hypothesis differential tests, branch coverage configuration and CI artifacts.
 - Added a tag-driven PyPI Trusted Publishing workflow and single-source package version.
+- Documented and tested caller-owned ndarray output, in-place, and aliasing behavior.
 
 ## 0.2.0 - 2026-08-15
 
