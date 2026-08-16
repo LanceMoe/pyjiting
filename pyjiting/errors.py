@@ -21,3 +21,11 @@ class CodegenError(CompileError):
 
 class SpecializationLimitError(CompileError):
     """Raised when one decorated function exceeds its configured specialization limit."""
+
+
+class RuntimeClosedError(RuntimeError):
+    """Raised when a closed JIT runtime is used."""
+
+
+class RuntimeResourceError(RuntimeError):
+    """Raised when a JIT runtime resource budget is exhausted."""

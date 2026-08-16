@@ -141,8 +141,16 @@ def test_array_any_all_match_python_identities_and_nan_truthiness():
         np.array([1.0, 2.0], dtype=np.float32)[::-1],
     ):
         assert array_any_all(values) == int(any(values)) + int(all(values)) * 2
-    with pytest.raises(ValueError, match='index count'):
-        array_sum_builtin(np.zeros((2, 2), dtype=np.float64))
+
+
+@pytest.mark.parametrize('dtype', [np.int32, np.int64, np.float32, np.float64])
+def test_multidimensional_reductions_follow_numpy_layouts(dtype):
+    base = (np.arange(24) % 3).astype(dtype).reshape(4, 6)
+    layouts = (base, base.T, base[::-1, 1::2], np.asfortranarray(base),
+               np.empty((2, 0, 3), dtype=dtype))
+    for values in layouts:
+        assert array_sum_builtin(values) == pytest.approx(np.sum(values))
+        assert array_any_all(values) == int(np.any(values)) + int(np.all(values)) * 2
 
 
 def test_numeric_intrinsics_reject_unsupported_static_inputs():

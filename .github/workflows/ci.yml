@@ -37,7 +37,16 @@ jobs:
         run: uv sync --extra dev --python ${{ matrix.python }}
 
       - name: Run tests
-        run: uv run --python ${{ matrix.python }} pytest -q
+        run: uv run --python ${{ matrix.python }} coverage run -m pytest -q
+
+      - name: Create coverage report
+        run: uv run --python ${{ matrix.python }} coverage xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-${{ matrix.os }}-py${{ matrix.python }}
+          path: coverage.xml
 
       - name: Run Pyright
         run: uv run --python ${{ matrix.python }} pyright
@@ -55,4 +64,20 @@ jobs:
           $wheel = (Get-ChildItem dist -Filter 'pyjiting-*.whl' | Select-Object -First 1 -ExpandProperty FullName)
           if (-not $wheel) { throw 'Wheel artifact not found' }
           uv pip install --python .venv --force-reinstall $wheel
-          uv run --no-sync python -I -c "from pyjiting import jit; import pyjiting; assert pyjiting.__version__ == '0.2.0'; assert jit.from_source('def increment(value):\n    return value + 1')(41) == 42"
+          uv run --no-sync python -I -c "from pyjiting import jit; import pyjiting; assert pyjiting.__version__; assert jit.from_source('def increment(value):\n    return value + 1')(41) == 42"
+
+  benchmark:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - run: uv sync --extra dev
+      - run: uv run python benchmarks/benchmark.py --repeat 20 --json benchmark.json
+      - uses: actions/upload-artifact@v6
+        with:
+          name: benchmark-${{ github.sha }}
+          path: benchmark.json

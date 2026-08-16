@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - run: uv sync --extra dev
+      - run: uv run pytest -q
+      - run: uv run pyright
+      - run: uv build
+      - name: Smoke-test wheel
+        shell: bash
+        run: |
+          wheel=$(find dist -name 'pyjiting-*.whl' -print -quit)
+          uv venv .verify
+          uv pip install --python .verify/bin/python --force-reinstall "$wheel"
+          .verify/bin/python -I -c "from pyjiting import jit; assert jit.from_source('def f(x):\n    return x + 1')(2) == 3"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: distributions
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

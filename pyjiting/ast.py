@@ -16,7 +16,7 @@ class Node(ast.AST):
         cloned = type(self).__new__(type(self))
         memo[id(self)] = cloned
         for name, value in self.__dict__.items():
-            setattr(cloned, name, value if name in ('namespace', 'bindings') else copy.deepcopy(value, memo))
+            setattr(cloned, name, value if name in ('namespace', 'bindings', 'runtime_state') else copy.deepcopy(value, memo))
         return cloned
 
 

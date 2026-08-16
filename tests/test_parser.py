@@ -68,9 +68,9 @@ def test_parser_rejects_unknown_annotations_with_a_location():
 @pytest.mark.parametrize(
     ('source', 'message'),
     [
-        ('def defaulted(value=1):\n    return value', 'default, keyword-only, and variadic parameters'),
-        ('def keyword_only(*, value):\n    return value', 'default, keyword-only, and variadic parameters'),
-        ('def variadic(*values):\n    return 0', 'default, keyword-only, and variadic parameters'),
+        ('def defaulted(value=1):\n    return value', 'default parameters require the @jit function decorator'),
+        ('def keyword_only(*, value):\n    return value', 'keyword-only and variadic parameters'),
+        ('def variadic(*values):\n    return 0', 'keyword-only and variadic parameters'),
         ('def caller(value):\n    return callee(value=value)', 'keyword arguments are not supported'),
     ],
 )

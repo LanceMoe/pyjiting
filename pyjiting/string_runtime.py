@@ -18,6 +18,7 @@ _state = threading.local()
 _callbacks = {}
 _literals = {}
 _allocator = None
+_callback_counts = {}
 
 
 def begin_call():
@@ -293,8 +294,22 @@ def callback_address(name):
             'ord': _ord(),
             'chr': _chr(),
         })
-    return ctypes.cast(_callbacks[name], ctypes.c_void_p).value
+    callback = _callbacks[name]
+    counted = _callbacks.get(f'counted:{name}')
+    if counted is None:
+        prototype = type(callback)
+
+        @prototype
+        def counted(*args):
+            _callback_counts[name] = _callback_counts.get(name, 0) + 1
+            return callback(*args)
+        _callbacks[f'counted:{name}'] = counted
+    return ctypes.cast(_callbacks[f'counted:{name}'], ctypes.c_void_p).value
 
 
 def literal_count():
     return len(_literals)
+
+
+def callback_stats():
+    return dict(_callback_counts)

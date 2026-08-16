@@ -77,6 +77,7 @@ class ASTVisitor(ast.NodeVisitor):
         self._bindings = {}
         self._local_names = set()
         self._loop_depth = 0
+        self._allow_defaults = isinstance(source, (types.FunctionType, types.LambdaType))
         if isinstance(source, (types.FunctionType, types.LambdaType, types.ModuleType)):
             if isinstance(source, (types.FunctionType, types.LambdaType)):
                 try:
@@ -108,8 +109,10 @@ class ASTVisitor(ast.NodeVisitor):
         return self.visit(functions[0])
 
     def visit_FunctionDef(self, node):
-        if node.args.defaults or node.args.kw_defaults or node.args.vararg or node.args.kwarg or node.args.kwonlyargs:
-            raise CompileError('default, keyword-only, and variadic parameters are not supported', node.args)
+        if node.args.kw_defaults or node.args.vararg or node.args.kwarg or node.args.kwonlyargs:
+            raise CompileError('keyword-only and variadic parameters are not supported', node.args)
+        if node.args.defaults and not self._allow_defaults:
+            raise CompileError('default parameters require the @jit function decorator', node.args)
         args = []
         self._local_names = {arg.arg for arg in [*node.args.posonlyargs, *node.args.args]}
         for item in ast.walk(node):

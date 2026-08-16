@@ -1,7 +1,7 @@
 import pytest
 
 from pyjiting import clear_cache, jit, runtime_stats
-from pyjiting.errors import SpecializationLimitError
+from pyjiting.errors import InferError, SpecializationLimitError
 
 
 @jit(max_specializations=1)
@@ -47,3 +47,23 @@ def test_cache_configuration_validation_and_clear_target_validation():
         jit(plain, max_specializations=0)
     with pytest.raises(TypeError, match='expects a @jit function'):
         clear_cache(lambda: None)
+
+
+def test_deterministic_compilation_failures_are_cached_and_clearable():
+    @jit
+    def invalid(value):
+        return missing(value)  # pyright: ignore[reportUndefinedVariable]
+
+    clear_cache(invalid)
+    before = runtime_stats()['compile_failures']
+    with pytest.raises(InferError, match='not registered'):
+        invalid(3)
+    with pytest.raises(InferError, match='not registered'):
+        invalid(3)
+    after = runtime_stats()
+    assert after['compile_failures'] == before + 1
+    assert after['failure_cache_hits'] >= 1
+    assert clear_cache(invalid) == 1
+    with pytest.raises(InferError, match='not registered'):
+        invalid(3)
+    assert runtime_stats()['compile_failures'] == before + 2

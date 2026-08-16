@@ -57,7 +57,7 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 | 制御フロー | `if`、`while`、`range`、一次元配列／文字列の反復、`break`、`continue`、ループ `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 文字列 | Unicode 値、比較／包含判定、完全なスライス、連結／反復、変換、文字種判定、検索、`ord`／`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
 | Tuple | 固定長の異種リテラル／引数／戻り値、ネスト、注釈、定数添字、`len`、真理値、固定長名前アンパック | `tests/test_tuple_phase4.py` |
-| 配列 | 4 種の数値 dtype、安全な添字、多次元 Strided アクセス、一次元反復、`sum`／`any`／`all` リダクション | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
+| 配列 | 4 種の数値 dtype、安全な添字、多次元 Strided アクセス、一次元反復、多次元全体の `sum`／`any`／`all` スカラーリダクション | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
 | 組み込み関数 | スカラ／文字列関数と、ネイティブ `math` の三角・平方根・指数・対数・分類・定数 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
 | 定数 | `@jit` 適用時に不変スカラ／文字列のグローバルおよびクロージャ値をキャプチャ | `tests/test_numeric_phase3.py` |
 | アノテーションとコールバック | スカラ／文字列アノテーション、`np.ndarray` dtype の遅延特化、型注釈付き `@reg` | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
@@ -70,7 +70,7 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 整数演算は 2 の補数表現による固定幅の挙動に準拠します。特に、符号付き最小整数を -1 で割った場合でも任意精度への昇格は行われず、オーバーフローして符号付き最小整数のままとなります。
 
 配列は descriptor v2 ABI（`data`、`ndim`、`shape`、バイト単位の `strides`、`itemsize`、NumPy flags）を使用します。要素と shape の負添字および境界検査に対応し、転置、slice、負 stride、バイト stride、未アライン view も安全に処理します。実際に読み取り専用配列へ書き込むと `ValueError("assignment destination is read-only")` になります。範囲外は `IndexError`、添字数の不一致は `ValueError` です。配列生成、ブロードキャスト、配列の戻り値、配列全体の ufunc は未対応です。
-一次元 Strided 配列ではネイティブ `sum`、`any`、`all` を利用でき、int32/float32 の和は int64/float64 へ拡張され、空配列の単位元は Python と一致します。
+任意ランクの Strided 配列ではネイティブな全体 `sum`、`any`、`all` を利用でき、int32/float32 の和は int64/float64 へ拡張され、空配列の単位元は Python と一致します。axis リダクションは未対応です。
 
 不変の数値／文字列グローバルおよびクロージャ値は `@jit` 適用時に Core リテラルとして固定されます。ネイティブ `math` は `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮動小数点分類、標準定数に対応し、domain/range エラーは JIT エラー ABI で伝播します。
 
@@ -79,6 +79,8 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 Tuple は不変の固定長構造型で、要素型は特化シグネチャとマングル名に含まれます。ネイティブ値は形状固有構造へのポインタとして渡され、呼び出し単位の arena が保持するため、プラットフォーム依存の集約戻り ABI を回避できます。Python／JIT-to-JIT 境界でネストした数値／文字列 tuple を扱えます。
 
 各特化コードは、デコレートされた Python 関数の識別情報（identity）と型シグネチャから生成される一意の LLVM シンボルを使用します。そのため、同じ関数名を持つ別々の関数が誤ってキャッシュを共有してしまうことはありません。
+
+通常の `@jit` wrapper は元の Python シグネチャを使って位置／キーワード混在呼び出しと不変なデフォルト引数を扱えます。`compiled.specialize(*args)` は実行せずにコンパイルし、`runtime_stats(compiled)`、`inspect_specializations(compiled)`、`get_llvm_ir(compiled, *args)` は関数単位の統計、特化一覧、診断用 IR を提供します。`JITContext` は Notebook や長時間プロセス向けに独立 engine、module/specialization 予算、明示的な close を提供します。複雑な Unicode 変換は Python runtime を呼び出し、その回数は `runtime_stats()['string_callbacks']` で確認できます。
 
 ## 動作要件
 
@@ -93,7 +95,8 @@ Tuple は不変の固定長構造型で、要素型は特化シグネチャと�
 
 ```bash
 uv sync --extra dev
-uv run pytest -q
+uv run coverage run -m pytest -q
+uv run coverage report
 uv run pyright
 
 ```
@@ -200,7 +203,7 @@ uv run examples/example_mixed_types.py
 
 ## パフォーマンス
 
-`uv run benchmarks/benchmark.py` でベンチマークを実行できます。初回コンパイル＋実行（コールド）、キャッシュ後の実行（ウォーム）、および同等の CPython 実装の実行時間を比較します。各ワークロードには動的な剰余演算等が含まれており、ループが定数計算へ最適化で消滅しないように設計されています。
+`uv run benchmarks/benchmark.py --repeat 20` で cold、warm、CPython、NumPy の比較を複数回実行できます。`--json result.json` を追加すると、生サンプルと環境メタデータを保存します。各結果を検証し、median、minimum、standard deviation を報告します。cold 呼び出しは特化と LLVM コンパイルを含み、warm 呼び出しは既存のネイティブ特化を使用します。
 
 サンプルコードは `examples/` ディレクトリに収録されています。
 
@@ -276,8 +279,8 @@ pyjiting/
 * void 以外の戻り値を持つ JIT 関数は、すべての制御フローパスで値を return する必要があります。
 * 整数のべき乗（`**`）は、指数部がコンパイル時定数である必要があります（動的な負の指数は静的に戻り型を一意に決定できないため）。
 * `@reg` 関数はサポート対象のスカラ型または文字列型アノテーションを完全に備える必要があります。コールバック例外は最外層の Python 呼び出し地点で再送出され、ctypes ABI を跨ぎません。
-* デフォルト引数、キーワード専用引数、可変長引数（`*args`, `**kwargs`）、キーワード引数による呼び出しはサポートしていません。JIT 関数の呼び出しは、宣言された位置引数の数と厳密に一致する必要があります。
-* 可変グローバル、List／Dict、starred／ネストしたアンパック対象、動的 tuple 添字、tuple の変更／比較／反復、任意の Python オブジェクト、多次元配列リダクション／反復、axis、NumPy 配列全体の演算は未対応です。
+* 通常の `@jit` は不変なデフォルト引数と外側のキーワード実引数をサポートします。キーワード専用引数、可変長引数（`*args`, `**kwargs`）、JIT 関数内部のキーワード呼び出しは未対応です。
+* 可変グローバル、List／Dict、starred／ネストしたアンパック対象、動的 tuple 添字、tuple の変更／比較／反復、任意の Python オブジェクト、多次元配列反復、axis、NumPy 配列全体の演算は未対応です。
 
 # 謝辞
 

@@ -2,6 +2,30 @@
 
 All notable changes to Pyjiting are documented in this file.
 
+## 0.3.0 - 2026-08-16
+
+### Usability
+
+- Added Python signature binding for keyword calls and immutable default arguments.
+- Added explicit specialization warmup, per-function statistics, specialization
+  inspection and LLVM IR diagnostics.
+- Preserved decorated callable types through `ParamSpec` overloads.
+
+### Runtime
+
+- Added isolated `JITContext` engines with close semantics and specialization/module
+  budgets.
+- Added deterministic compilation-failure caching and observable string runtime
+  callback counters.
+- Added multidimensional whole-array `sum`, `any` and `all` over arbitrary NumPy
+  strides.
+
+### Quality
+
+- Added repeatable cold/warm benchmarks with JSON output and NumPy comparisons.
+- Added Hypothesis differential tests, branch coverage configuration and CI artifacts.
+- Added a tag-driven PyPI Trusted Publishing workflow and single-source package version.
+
 ## 0.2.0 - 2026-08-15
 
 ### Safety

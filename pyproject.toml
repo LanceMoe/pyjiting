@@ -1,6 +1,6 @@
 [project]
 name = "pyjiting"
-version = "0.2.0"
+dynamic = ["version"]
 description = "A small typed Python subset JIT compiler built with llvmlite"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,6 +29,8 @@ Issues = "https://github.com/LanceMoe/pyjiting/issues"
 
 [project.optional-dependencies]
 dev = [
+    "coverage[toml]>=7.6",
+    "hypothesis>=6.120",
     "pyright>=1.1.400",
     "pytest>=8.3",
 ]
@@ -40,9 +42,30 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["pyjiting"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.venv*",
+    "/.mypy_cache",
+    "/.pytest_cache",
+    "/__pycache__",
+    "/dist",
+    "/wheel-verify",
+]
+
+[tool.hatch.version]
+path = "pyjiting/__init__.py"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.coverage.run]
+branch = true
+source = ["pyjiting"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
 
 [tool.pyright]
 include = ["pyjiting", "tests"]

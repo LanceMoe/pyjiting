@@ -30,7 +30,8 @@ ARRAY_F_CONTIGUOUS = 1 << 3
 
 
 _scalar_ctypes = {1: ctypes.c_int8, 8: ctypes.c_int8, 16: ctypes.c_int16, 32: ctypes.c_int32, 64: ctypes.c_int64}
-_numpy_ctypes = {np.dtype(np.int32): ctypes.c_int32, np.dtype(np.int64): ctypes.c_int64, np.dtype(np.float32): ctypes.c_float, np.dtype(np.float64): ctypes.c_double}
+_numpy_ctypes = {np.dtype(np.int32): ctypes.c_int32, np.dtype(np.int64): ctypes.c_int64,
+                 np.dtype(np.float32): ctypes.c_float, np.dtype(np.float64): ctypes.c_double}
 _tuple_ctypes = {}
 
 

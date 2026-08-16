@@ -57,7 +57,7 @@ Pyjiting 在函数首次被调用时将其 JIT 编译为原生机器码。被 `@
 | 控制流 | `if`、`while`、`for in range(...)`、一维数组/字符串迭代、`break`、`continue`、循环 `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 字符串 | Unicode 值、比较/成员判断、完整切片、拼接/重复、大小写/去空白/替换、字符谓词、搜索及 `ord`/`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
 | Tuple | 固定长度异构字面量/参数/返回值、嵌套、注解、常量索引、`len`、真值及定长名称解包 | `tests/test_tuple_phase4.py` |
-| 数组 | 四种数值 dtype；安全索引、多维 Strided 读写、一维迭代及 `sum`/`any`/`all` 归约 | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
+| 数组 | 四种数值 dtype；安全索引、多维 Strided 读写、一维迭代及多维全量 `sum`/`any`/`all` 标量归约 | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
 | 内建函数 | 标量/字符串内建函数，以及原生 `math` 三角、开方、指数、对数、分类与常量 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
 | 常量 | 在应用 `@jit` 时捕获不可变的标量/字符串全局及闭包值 | `tests/test_numeric_phase3.py` |
 | 注解与回调 | 标量/字符串注解、`np.ndarray` dtype 惰性特化、带注解的 `@reg` 回调 | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
@@ -70,7 +70,7 @@ Pyjiting 采用定宽的 Int32/Int64，而非 Python 原生的任意精度大整
 整数运算严格遵循二进制补码的定宽语义。特别地，最小有符号负数除以 `-1` 时不会自动提升精度，而是直接发生溢出并保留为最小有符号负数。
 
 数组使用 descriptor v2 ABI：`data`、`ndim`、`shape`、以字节表示的 `strides`、`itemsize` 以及 NumPy flags。元素和 shape 索引支持负数并进行边界检查，支持转置、切片、负 stride、字节 stride 以及未对齐 view；读写使用对齐安全的访问。向只读数组实际写入会抛出 `ValueError("assignment destination is read-only")`；越界抛出 `IndexError`，索引维度数不匹配则抛出 `ValueError`。数组创建、广播、数组返回及整组 ufunc 运算仍不支持。
-一维 Strided 数组支持原生 `sum`、`any` 和 `all`；int32/float32 求和提升为 int64/float64，空数组身份值与 Python 一致。
+任意维度 Strided 数组支持原生全量 `sum`、`any` 和 `all`；int32/float32 求和提升为 int64/float64，空数组身份值与 Python 一致。axis 归约仍不支持。
 
 不可变的数值/字符串全局与闭包值会在应用 `@jit` 时冻结为 Core 字面量。原生 `math` 支持 `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮点分类及常量；domain/range 异常沿 JIT 错误 ABI 传播。
 
@@ -79,6 +79,8 @@ Pyjiting 采用定宽的 Int32/Int64，而非 Python 原生的任意精度大整
 Tuple 是不可变的固定长度结构类型，元素类型会进入特化签名和名称修饰。原生值通过指向形状专属结构的指针传递，并由单次调用 arena 保活，从而避开平台相关的聚合返回 ABI；Python 与 JIT-to-JIT 边界支持嵌套数值/字符串 tuple。
 
 每个特化版本均使用由 Python 函数本体（Identity）及其类型签名派生出的独立 LLVM 符号。因此，即使存在同名的不同函数，也不会发生错误的本地缓存共享。
+
+普通 `@jit` wrapper 通过原 Python 签名支持位置/关键字混合调用和不可变默认参数。`compiled.specialize(*args)` 可以只编译而不执行；`runtime_stats(compiled)`、`inspect_specializations(compiled)` 和 `get_llvm_ir(compiled, *args)` 分别提供函数级指标、特化列表和开发诊断 IR。`JITContext` 为 Notebook 和长期服务提供独立 engine、模块/特化预算及显式关闭语义。复杂 Unicode 转换仍会进入 Python 字符串 runtime；`runtime_stats()['string_callbacks']` 可观察这些跨界调用。
 
 ## 环境要求
 
@@ -93,7 +95,8 @@ Tuple 是不可变的固定长度结构类型，元素类型会进入特化签�
 
 ```bash
 uv sync --extra dev
-uv run pytest -q
+uv run coverage run -m pytest -q
+uv run coverage report
 uv run pyright
 
 ```
@@ -200,7 +203,7 @@ uv run examples/example_mixed_types.py
 
 ## 性能测试
 
-运行 `uv run benchmarks/benchmark.py` 可执行基准性能测试。测试涵盖冷启动编译与执行、热缓存再次调用，以及原生 CPython 的对比耗时。测试负载中包含了动态取模等规约计算，确保循环体不会被编译器直接优化折叠。
+运行 `uv run benchmarks/benchmark.py --repeat 20` 可执行多轮冷启动、热调用、CPython 与 NumPy 对照测试；添加 `--json result.json` 可保存原始样本和环境元数据。脚本会校验每次结果并报告中位数、最小值和标准差。冷调用包含特化与 LLVM 编译，热调用使用已有原生特化。
 
 测试代码位于 `examples/` 目录下。
 
@@ -276,8 +279,8 @@ pyjiting/
 * 带有非 `None` 声明的 JIT 函数必须在所有控制流分支上均显式返回值（Return）。
 * 整数幂运算（`**`）的指数必须为编译期常量（因动态负指数无法推导确定单一的静态返回类型）。
 * 使用 `@reg` 注册的回调函数必须提供完整的标量或字符串类型注解。回调异常会在最外层 Python 调用点重新抛出，而不会跨越 ctypes ABI。
-* 不支持默认参数、仅限关键字参数、可变长参数（`*args`, `**kwargs`）及关键字实参调用。调用实参数量必须与声明的形参严格匹配。
-* 暂不支持可变全局、List/Dict、星号或嵌套解包目标、动态 tuple 索引、tuple 修改/比较/迭代、任意 Python 对象、多维数组归约/迭代、axis 及整组 NumPy 矢量化操作。
+* 普通 `@jit` 支持不可变默认参数和外层关键字实参；仍不支持仅限关键字参数和可变长参数（`*args`, `**kwargs`），JIT 函数内部调用仍只支持位置实参。
+* 暂不支持可变全局、List/Dict、星号或嵌套解包目标、动态 tuple 索引、tuple 修改/比较/迭代、任意 Python 对象、多维数组迭代、axis 及整组 NumPy 矢量化操作。
 
 # 特别致谢
 

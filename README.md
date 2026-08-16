@@ -55,7 +55,7 @@ Pyjiting compiles a function to native code when it is first called. A function 
 | Control flow | `if`, `while`, `for range`, one-dimensional array/string iteration, `break`, `continue`, negative/dynamic steps, nested loops and loop `else` | `tests/test_control_flow.py`, `tests/test_extensions.py` |
 | Strings | Unicode values, comparison/membership, full slicing, concat/repeat, transforms, predicates, search, and `ord`/`chr` | `tests/test_string.py`, `tests/test_string_phase2.py` |
 | Tuples | Fixed heterogeneous literals/arguments/returns, nesting, annotations, constant indexing, `len`, truthiness and exact name unpacking | `tests/test_tuple_phase4.py` |
-| Arrays | Four numeric ndarray dtypes; checked indexing, strided multidimensional access, one-dimensional iteration, and `sum`/`any`/`all` reductions | `tests/test_array.py`, `tests/test_extensions.py`, `tests/test_numeric_phase3.py` |
+| Arrays | Four numeric ndarray dtypes; checked indexing, strided multidimensional access, one-dimensional iteration, and multidimensional scalar `sum`/`any`/`all` reductions | `tests/test_array.py`, `tests/test_extensions.py`, `tests/test_numeric_phase3.py` |
 | Intrinsics | Typed scalar/string builtins plus native `math` trigonometry, roots, exponentials, logarithms, classification and constants | `tests/test_extensions.py`, `tests/test_string_phase2.py`, `tests/test_numeric_phase3.py` |
 | Constants | Immutable scalar/string globals and closure values captured when `@jit` is applied | `tests/test_numeric_phase3.py` |
 | Annotations and callbacks | Scalar/string annotations, deferred `np.ndarray` dtype specialization, and persistent annotated `@reg` callbacks | `tests/test_parser.py`, `tests/test_reg_callback.py`, `tests/test_extensions.py` |
@@ -68,7 +68,7 @@ pyjiting uses fixed-width Int32/Int64 values, not arbitrary-precision Python int
 Integer arithmetic follows two's-complement fixed-width behavior. In particular, the minimum signed integer divided by -1 remains the minimum signed integer, rather than attempting arbitrary-precision promotion.
 
 Arrays use a descriptor-v2 ABI: `data`, `ndim`, `shape`, byte `strides`, `itemsize`, and NumPy flags. Element reads and writes support checked negative indices and multidimensional, transposed, sliced, negative-stride, byte-strided, and unaligned NumPy views. Loads and stores use alignment-safe accesses; an actual write to a read-only view raises `ValueError("assignment destination is read-only")`. Out-of-range element or shape indices raise `IndexError`; an index-count mismatch raises `ValueError`. Array creation, broadcasting, array returns, and whole-array ufunc operations remain deliberately unsupported.
-One-dimensional strided arrays support native `sum`, `any`, and `all`; int32/float32 sums widen to int64/float64 and empty identities match Python.
+Strided arrays of any rank support native whole-array `sum`, `any`, and `all`; int32/float32 sums widen to int64/float64 and empty identities match Python. Axis reductions remain unsupported.
 
 Immutable numeric and string globals/nonlocals are frozen into Core literals when `@jit` is applied. Native `math` support includes `sin`, `cos`, `sqrt`, `exp`, `log`, `log2`, `log10`, floating classification, and the standard constants. Domain and range failures use the JIT error ABI.
 
@@ -77,6 +77,8 @@ Strings use a length-delimited UTF-32 ABI, so Unicode code-point indexing and em
 Tuples are immutable fixed-length structural types. A tuple's element types participate in specialization and mangling. Native values use pointers to shape-specific structures retained by the per-dispatch arena, avoiding platform-dependent aggregate-return ABIs. Python and JIT-to-JIT boundaries support nested numeric/string tuples.
 
 Each specialization is keyed by its decorated compilation-unit identity and argument types, and uses a private LLVM symbol. Functions with the same short name, source location, or signature therefore cannot share a cached native implementation by accident. `runtime_stats()` exposes cache/callback/literal counters; `clear_cache(function=None)` removes dispatcher cache entries but does not claim to release MCJIT code memory.
+
+Regular `@jit` wrappers accept positional/keyword calls and immutable default arguments through the original Python signature. Use `compiled.specialize(*args)` to compile without executing the function, `runtime_stats(compiled)` / `inspect_specializations(compiled)` for per-function metrics, and `get_llvm_ir(compiled, *args)` for development diagnostics. `JITContext` provides an isolated engine, module/specialization budgets, and explicit close semantics for notebooks and long-running processes. Complex Unicode transforms still call the Python string runtime; `runtime_stats()['string_callbacks']` makes those crossings observable.
 ## Requirements
 - Python >= 3.12
 - [uv](https://docs.astral.sh/uv/)
@@ -91,7 +93,8 @@ not part of the development workflow.
 
 ```bash
 uv sync --extra dev
-uv run pytest -q
+uv run coverage run -m pytest -q
+uv run coverage report
 uv run pyright
 ```
 
@@ -194,7 +197,7 @@ uv run examples/example_mixed_types.py
 
 ## Performance
 
-Run the focused benchmark with `uv run benchmarks/benchmark.py`. It reports cold compilation plus execution, a warm cached call, and an equivalent CPython loop. The workload uses a dynamic modular reduction so its loop body cannot be reduced to a closed-form counter calculation.
+Run `uv run benchmarks/benchmark.py --repeat 20` for repeated cold, warm, CPython and NumPy comparisons. Add `--json result.json` to save raw samples and environment metadata. The harness validates results and reports median, minimum and standard deviation. Cold calls include specialization and LLVM compilation; warm calls use an existing native specialization.
 
 You can find the source code of these test samples in the `examples/` directory.
 
