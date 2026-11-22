@@ -10,6 +10,7 @@ from .object_runtime import ObjectPointer, from_pointer, retain
 from .string_runtime import (StringDescriptor, StringPointer, begin_call, end_call,
                              keep_alive, make_string, take_pending_exception,
                              to_python)
+from .types import TupleType, bool_t
 
 
 ERROR_DIVISION_BY_ZERO = 1
@@ -56,7 +57,8 @@ def wrap_type(llvm_type) -> Any:
     if isinstance(llvm_type, ir.LiteralStructType):
         key = str(llvm_type)
         if key not in _tuple_ctypes:
-            fields = [(f'item_{index}', wrap_type(element)) for index, element in enumerate(llvm_type.elements)]
+            fields = [(f'item_{index}', wrap_type(element)) for index, element in enumerate(llvm_type.elements[:-1])]
+            fields.append(('owner', ObjectPointer))
             name = f'pyjiting_tuple_{len(_tuple_ctypes)}'
             _tuple_ctypes[key] = type(name, (ctypes.Structure,), {'_fields_': fields, '_pyjiting_tuple': True})
         return _tuple_ctypes[key]
@@ -111,9 +113,10 @@ def wrap_arg(arg, value):
 
 def wrap_tuple(pointer_type, value):
     structure_type = pointer_type._type_
-    if len(value) != len(structure_type._fields_): raise TypeError('tuple argument length does not match specialization')
+    fields = structure_type._fields_[:-1]
+    if len(value) != len(fields): raise TypeError('tuple argument length does not match specialization')
     converted = []
-    for item, (_, field_type) in zip(value, structure_type._fields_):
+    for item, (_, field_type) in zip(value, fields):
         if item is not None and field_type == StringPointer:
             converted.append(make_string(item))
         elif field_type == ObjectPointer:
@@ -122,20 +125,25 @@ def wrap_tuple(pointer_type, value):
             converted.append(wrap_tuple(field_type, item))
         else:
             converted.append(item)
+    converted.append(ctypes.cast(retain(value), ObjectPointer))
     structure = structure_type(*converted); pointer = ctypes.pointer(structure)
     keep_alive(structure, pointer)
     return pointer
 
 
-def unwrap_tuple(pointer):
+def unwrap_tuple(pointer, core_type=None):
     if not pointer: return ()
+    if pointer.contents.owner:
+        return from_pointer(pointer.contents.owner)
     result = []
-    for name, field_type in pointer._type_._fields_:
+    for index, (name, field_type) in enumerate(pointer._type_._fields_[:-1]):
         value = getattr(pointer.contents, name)
+        element_type = core_type.elements[index] if isinstance(core_type, TupleType) else None
         if field_type == StringPointer: result.append(to_python(value))
         elif field_type == ObjectPointer: result.append(from_pointer(value))
         elif issubclass(field_type, ctypes._Pointer) and getattr(field_type._type_, '_pyjiting_tuple', False):
-            result.append(unwrap_tuple(value))
+            result.append(unwrap_tuple(value, element_type))
+        elif element_type == bool_t: result.append(bool(value))
         else: result.append(value)
     return tuple(result)
 
@@ -147,7 +155,7 @@ def wrap_function(func, engine):
     return cfunc
 
 
-def dispatcher(fn, user_arg_count):
+def dispatcher(fn, user_arg_count, return_type=None):
     def call(*args):
         begin_call()
         try:
@@ -174,15 +182,16 @@ def dispatcher(fn, user_arg_count):
             if fn._restype_ == ObjectPointer: return from_pointer(result)
             if (isinstance(fn._restype_, type) and issubclass(fn._restype_, ctypes._Pointer) and
                     getattr(fn._restype_._type_, '_pyjiting_tuple', False)):
-                return unwrap_tuple(result)
+                return unwrap_tuple(result, return_type)
             if (isinstance(fn._restype_, type) and issubclass(fn._restype_, ctypes._Pointer) and
                     getattr(fn._restype_._type_, '_pyjiting_array', False)):
                 raise RuntimeError('internal ndarray descriptors cannot cross the Python return boundary')
-            return result
+            return bool(result) if return_type == bool_t else result
         finally:
             end_call()
     call.__name__ = fn.__name__
     return call
 
 
-def wrap_module(sig, llfunc, engine): return dispatcher(wrap_function(llfunc, engine), len(sig))
+def wrap_module(sig, llfunc, engine, return_type=None):
+    return dispatcher(wrap_function(llfunc, engine), len(sig), return_type)

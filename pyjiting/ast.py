@@ -1,5 +1,6 @@
 import ast
 import copy
+from types import CellType
 
 
 class Node(ast.AST):
@@ -16,7 +17,9 @@ class Node(ast.AST):
         cloned = type(self).__new__(type(self))
         memo[id(self)] = cloned
         for name, value in self.__dict__.items():
-            setattr(cloned, name, value if name in ('namespace', 'bindings', 'runtime_state') else copy.deepcopy(value, memo))
+            if name not in ('namespace', 'closure_cells', 'runtime_state'):
+                value = copy.deepcopy(value, memo)
+            setattr(cloned, name, value)
         return cloned
 
 
@@ -117,6 +120,37 @@ class MethodCall(Node):
         self.keywords, self.keyword_values = keywords, keyword_values
 
 
+class Invoke(MethodCall):
+    """A call whose callable is a Python value."""
+
+    def __init__(self, value, args, keywords, keyword_values, source=None):
+        super().__init__(value, None, args, keywords, keyword_values, source)
+
+
+class Global(Node):
+    _fields = ('name',)
+
+    def __init__(self, name, source=None):
+        super().__init__(source)
+        self.name = name
+
+
+class JoinedStr(Node):
+    _fields = ('parts',)
+
+    def __init__(self, parts, source=None):
+        super().__init__(source)
+        self.parts = parts
+
+
+class FormattedValue(Node):
+    _fields = ('value', 'format_spec', 'conversion')
+
+    def __init__(self, value, format_spec, conversion, source=None):
+        super().__init__(source)
+        self.value, self.format_spec, self.conversion = value, format_spec, conversion
+
+
 class Attribute(Node):
     _fields = ('value', 'name')
     def __init__(self, value, name, source=None):
@@ -126,10 +160,16 @@ class Attribute(Node):
 
 class Fun(Node):
     _fields = ('fname', 'args', 'body')
+    python_features: tuple[str, ...] = ()
+    direct_positional_count: int | None = None
+    closure_cells: dict[str, CellType]
+    definition: ast.FunctionDef | ast.AsyncFunctionDef
+    source_imports: list[ast.Import | ast.ImportFrom]
+
     def __init__(self, fname, args, body, return_annotation=None, source=None):
         super().__init__(); self.fname, self.args, self.body, self.return_annotation = fname, args, body, return_annotation
         self.symbol = fname
-        self.bindings = {}
+        self.closure_cells = {}
         if source is not None:
             for name in ('lineno', 'col_offset', 'end_lineno', 'end_col_offset'):
                 if hasattr(source, name):
@@ -186,15 +226,15 @@ class Comprehension(Node):
         self.body, self.result = body, result
 
 
-class SortKey(Node):
-    _fields = ('source_text', 'names', 'values')
-    def __init__(self, source_text, names, values, source=None):
-        super().__init__(source)
-        self.source_text, self.names, self.values = source_text, names, values
-
-
 class LitNone(Node):
     pass
+
+
+class LitObject(Node):
+    _fields = ('value',)
+    def __init__(self, value, source=None):
+        super().__init__(source)
+        self.value = value
 
 
 class Starred(Node):
@@ -245,6 +285,7 @@ PRIM_OPS = {
     ast.In: 'in#', ast.NotIn: 'notin#',
     ast.Is: 'is#', ast.IsNot: 'isnot#',
     ast.BitOr: 'bitor#', ast.BitAnd: 'bitand#', ast.BitXor: 'bitxor#',
+    ast.LShift: 'lshift#', ast.RShift: 'rshift#',
 }
 ARITHMETIC_OPS = {'add#', 'sub#', 'mult#', 'div#', 'floordiv#', 'mod#', 'pow#'}
 BITWISE_OPS = {'bitor#', 'bitand#', 'bitxor#'}

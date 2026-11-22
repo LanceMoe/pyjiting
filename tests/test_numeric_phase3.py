@@ -153,7 +153,7 @@ def test_multidimensional_reductions_follow_numpy_layouts(dtype):
         assert array_any_all(values) == int(np.any(values)) + int(np.all(values)) * 2
 
 
-def test_numeric_intrinsics_reject_unsupported_static_inputs():
+def test_numeric_intrinsics_reject_invalid_inputs():
     @jit
     def invalid_math(value: str):
         return math.sin(value)  # pyright: ignore[reportArgumentType]
@@ -164,7 +164,7 @@ def test_numeric_intrinsics_reject_unsupported_static_inputs():
 
     with pytest.raises(InferError, match='expects one numeric argument'):
         invalid_math('x')
-    with pytest.raises(InferError, match='expects one array argument'):
+    with pytest.raises(TypeError, match='not iterable'):
         invalid_sum(3)
 
 

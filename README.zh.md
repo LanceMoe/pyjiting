@@ -56,12 +56,14 @@ Pyjiting 在函数首次被调用时将其 JIT 编译为原生机器码。被 `@
 | 算术 | `+ - * / // % **`、一元 `-`、符合 Python 规范的 floor/mod 符号语义、常量整数幂、适配 NaN 的标量真值判定 | `tests/test_arith.py` |
 | 控制流 | `if`、`while`、`for in range(...)`、一维数组/字符串迭代、`break`、`continue`、循环 `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 字符串 | Unicode 值、比较/成员判断、完整切片、拼接/重复、大小写/去空白/替换、字符谓词、搜索及 `ord`/`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
-| Tuple | 固定长度异构字面量/参数/返回值、嵌套、注解、常量索引、`len`、真值及定长名称解包 | `tests/test_tuple_phase4.py` |
+| 元组 | 固定与可变长度、动态索引、切片、拼接、重复、迭代、比较和解包 | `tests/test_tuple_phase4.py`、`tests/test_builtin_types.py` |
+| 其他内建类型 | `complex`、`bytes`、`bytearray`、`memoryview`、`range`、`slice`、`None` 及可选类型注解 | `tests/test_builtin_types.py` |
 | 列表 | 混合及嵌套元素、字面量、推导式、`list()`、索引与切片读写删除、迭代、标准方法及参数与返回值的对象身份 | `tests/test_list.py` |
 | 集合 | `set` 和 `frozenset`、字面量与推导式、迭代、集合运算、比较及标准方法 | `tests/test_set.py` |
 | 字典 | 支持 `**` 展开的字面量、推导式、`dict()`、键访问和更新、实时视图、合并运算和标准方法 | `tests/test_dict.py` |
 | 数组 | 四种数值 dtype；安全索引、多维 Strided 读写、一维迭代及多维全量 `sum`/`any`/`all` 标量归约 | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
-| 内建函数 | 标量/字符串内建函数，以及原生 `math` 三角、开方、指数、对数、分类与常量 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
+| Python 语法 | f-string、关键字和可变参数调用，以及通过 CPython 执行的生成器、异常处理、上下文管理、模式匹配、异步函数和闭包 | `tests/test_python_syntax.py` |
+| 内建函数 | 通过 Python 运行时支持 `round`、`pow`、`min`/`max`、`sorted`、`map`、`filter`、`zip` 等，并保留原生数值和字符串内建操作 | `tests/test_python_builtins.py`、`tests/test_numeric_phase3.py` |
 | 常量 | 在应用 `@jit` 时捕获不可变的标量/字符串全局及闭包值 | `tests/test_numeric_phase3.py` |
 | 注解与回调 | 标量/字符串注解、`np.ndarray` dtype 惰性特化、带注解的 `@reg` 回调 | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 验证机制 | 解析器源码位置映射、推导规则校验、LLVM 生成模块合法性验证 | `tests/test_parser.py`、`tests/test_codegen.py` |
@@ -70,9 +72,11 @@ Pyjiting 在函数首次被调用时将其 JIT 编译为原生机器码。被 `@
 
 列表支持混合类型、嵌套列表和 `None` 元素，也支持负下标、切片、元素和切片的赋值与删除、星号及嵌套解包、迭代、成员判断、比较、拼接、重复及所有标准列表方法，包括 `sort(key=..., reverse=...)`。列表作为实参或返回值时保留对象身份。同一个列表的别名能看到原地修改，切片和 `copy()` 都是浅拷贝。`list[T]` 注解只声明是列表，运行时不检查每个元素的类型。函数的控制流由 LLVM 编译，列表操作由 Python 运行时执行。
 
-`dict`、`set`、`frozenset`、`complex`、`bytes`、`bytearray`、`memoryview` 和任意 Python 对象暂不能作为独立 JIT 参数或原生类型。`None` 可作为返回值或由 Python 运行时保存，但不能作为独立参数传入，也不支持 `int | None` 等联合类型注解。`range(...)` 可用于循环，也可用于 `list(range(n))` 等表达式。`range` 和 `slice` 对象不能作为参数传入。元组不支持动态索引、切片、拼接、比较或迭代。原生字符串暂不支持 `split()` 和 `encode()`。
+集合和字典支持构造、推导式、迭代、运算及标准方法。字典保留插入顺序和实时视图，原地更新对调用方可见。
 
-原生 Python `int` 实参必须在有符号 64 位范围内，原生整数运算溢出会回绕。原生 `bool` 返回到 Python 时目前是 `0` 或 `1`，原生元组中的布尔值也一样。Python 列表、集合和字典里的布尔值保留原类型。NumPy 数组实参只支持 `int32`、`int64`、`float32`、`float64`，不支持直接返回 ndarray。不支持的实参类型会在编译前抛出 `TypeError`，开启 `fallback=True` 也一样。
+JIT 可接收和返回 `complex`、`bytes`、`bytearray`、`memoryview`、`range`、`slice` 和 `None`。复数运算、二进制序列方法、缓冲区视图和范围与切片操作沿用 Python 语义。可变缓冲区及视图保留对象身份，通过可写视图修改会反映到原缓冲区。`split()`、`encode()`、`format()` 等没有原生实现的字符串方法由 Python 执行。
+
+`int | None`、`Optional[int]` 和 `object` 等注解在运行时使用 Python 对象，联合类型注解不逐一验证成员类型。布尔返回值（包括固定元组里的布尔值）保留 `bool` 类型。原生 `int` 使用有符号 64 位整数，运算溢出会回绕。显式标注 `object` 的参数使用 Python 算术。原生 NumPy 数组仍支持四种数值 dtype，不能直接返回。
 
 ### 数值与数组语义
 
@@ -87,11 +91,17 @@ Pyjiting 采用定宽的 Int32/Int64，而非 Python 原生的任意精度大整
 
 字符串采用带长度的 UTF-32 ABI，可正确处理 Unicode 码点和内嵌 NUL。临时值与返回值由单次调用 arena 管理。切片支持省略、正数、负数和动态非零步长；成员判断、Unicode 大小写转换、去空白、替换、字符谓词及 `ord`/`chr` 在静态子集内遵循 Python 语义。
 
-Tuple 是不可变的固定长度结构类型，元素类型会进入特化签名和名称修饰。原生值通过指向形状专属结构的指针传递，并由单次调用 arena 保活，从而避开平台相关的聚合返回 ABI；Python 与 JIT-to-JIT 边界支持嵌套数值/字符串 tuple。
+固定元组继续按元素类型特化，通过形状专属结构传递，并可保留对原始 Python 元组的引用。`tuple` 和 `tuple[T, ...]` 注解使用 Python 元组。元组支持动态索引、切片、迭代、星号解包、比较和序列运算。
 
 每个特化版本均使用由 Python 函数本体（Identity）及其类型签名派生出的独立 LLVM 符号。因此，即使存在同名的不同函数，也不会发生错误的本地缓存共享。
 
-普通 `@jit` wrapper 通过原 Python 签名支持位置和关键字混合调用及支持类型的默认参数。列表、集合和字典的默认值在多次调用之间共享同一对象。`compiled.specialize(*args)` 可以只编译而不执行；`runtime_stats(compiled)`、`inspect_specializations(compiled)` 和 `get_llvm_ir(compiled, *args)` 分别提供函数级指标、特化列表和开发诊断 IR。统计包含编译等待、每个签名的编译次数、轻量失败详情、字符串 runtime 调用和注册回调调用。`JITContext` 为 Notebook 和长期服务提供独立 engine、模块/特化预算、显式关闭语义，并清理通过该 context 注册的回调。
+`@jit` 和 `jit_from_source` 都支持仅限位置形参、仅限关键字形参、受支持类型的默认值、`*args` 和 `**kwargs`。可变默认值会跨调用保留对象身份。编译后的函数也可以传入关键字实参和展开实参。源码入口只求值一次默认参数，并通过传入的 `namespace` 字典查找全局名称，包括函数创建后加入的绑定。
+
+f-string 可以在 LLVM 函数里使用，转换和嵌套格式说明遵循 Python 的格式化协议。`round`、`pow`、`bin`、`oct`、`hex`、`ascii`、`callable`、`getattr`、`hasattr`、`map`、`filter`、`print` 等走 Python 对象运行时。`min` 和 `max` 支持 `key` 与 `default`，`sorted` 支持 `key` 与 `reverse`，`zip` 支持 `strict`。
+
+包含生成器表达式、`yield`、`yield from`、`try`/`except`/`finally`、`with`、`match`、异步语法、嵌套定义、lambda 或直接使用 `locals()` 等依赖调用帧的内建函数时，整个函数由 CPython 执行。这些函数可以通过普通 JIT 入口使用，也可以由 LLVM 函数调用。`runtime_stats(compiled)['backend']` 会显示 `'llvm'` 或 `'cpython'`，`python_features` 会列出选择 CPython 的语法特征。
+
+LLVM 函数可用 `compiled.specialize(*args, **kwargs)` 只编译而不执行，通过 `runtime_stats(compiled)` 和 `inspect_specializations(compiled)` 查看指标，并用 `get_llvm_ir(compiled, *args, **kwargs)` 查看 IR。统计包含编译等待、每个签名的编译次数、失败详情、字符串运行时调用和注册回调调用。`JITContext` 提供独立引擎、模块和特化预算、显式关闭语义，以及对其注册回调的清理。
 
 启用 `fallback=True` 时，前端、类型推断或 codegen 不支持的路径会执行原 Python 函数。`FallbackWarning` 提供 `function`、`reason` 和 `error_type` 字段；`fallback_warning` 可设为默认的 `"once"`、`"always"` 或 `"ignore"`。函数特化上限、context 资源上限、已关闭 runtime 和 LLVM 内部错误绝不会回退。字符串索引和比较使用原生 UTF-32 路径；`upper()`、`lower()` 等复杂 Unicode 转换仍进入 Python 字符串 runtime，并可通过 `runtime_stats()['string_callbacks']` 观察。
 
@@ -216,6 +226,8 @@ uv run examples/example_mixed_types.py
 uv run examples/example_lists.py
 uv run examples/example_sets.py
 uv run examples/example_dicts.py
+uv run examples/example_builtin_types.py
+uv run examples/example_python_syntax.py
 
 ```
 
@@ -291,14 +303,13 @@ pyjiting/
 
 本项目主要用于学术研究与教学探索，并非面向生产环境的成熟 JIT 编译器。目前存在的限制如下：
 
-* 未与垃圾回收机制（GC）集成；仅支持静态类型化的小型 Python 语法子集。
-* `for` 支持 `range`、列表、集合、字典、字符串和一维数组。编译期可确定的零步长会报错。
+* LLVM 编译覆盖静态类型化的 Python 子集。通过 CPython 执行的函数没有 LLVM 特化或 IR。
+* `for` 支持 `range`、列表、集合、字典、元组、字符串、二进制序列和一维数组。编译期可确定的零步长会报错。
 * 运行时除以零将抛出 `ZeroDivisionError`；动态步长为 `0` 的 `range` 将通过 JIT 错误 ABI 抛出 `ValueError`。
-* 带有非 `None` 声明的 JIT 函数必须在所有控制流分支上均显式返回值（Return）。
+* 具有具体返回类型的函数必须在所有控制流分支上返回值。可选、联合及对象返回类型允许隐式返回 `None`。
 * 整数幂运算（`**`）的指数必须为编译期常量（因动态负指数无法推导确定单一的静态返回类型）。
 * 使用 `@reg` 注册的回调函数必须提供完整的标量或字符串类型注解。回调异常会在最外层 Python 调用点重新抛出，而不会跨越 ctypes ABI。
-* 普通 `@jit` 支持相应类型的默认参数和外层关键字实参。仅限关键字形参和可变长形参（`*args`、`**kwargs`）暂不支持。JIT 函数内部可在列表排序、`dict()` 和 `dict.update()` 中使用关键字实参。
-* 暂不支持可变全局、多维数组迭代、按轴归约及整组 NumPy 矢量化操作。
+* LLVM 函数仍对全局对象值、类型注解、多维数组迭代、按轴归约和整组 NumPy 矢量化操作有限制。
 
 # 特别致谢
 

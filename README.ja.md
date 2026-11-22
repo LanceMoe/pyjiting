@@ -56,12 +56,14 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 | 演算 | `+ - * / // % **`、単項 `-`、Python 互換の floor/mod 符号規則、定数整数べき乗、NaN を考慮した真理値判定 | `tests/test_arith.py` |
 | 制御フロー | `if`、`while`、`range`、一次元配列／文字列の反復、`break`、`continue`、ループ `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 文字列 | Unicode 値、比較／包含判定、完全なスライス、連結／反復、変換、文字種判定、検索、`ord`／`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
-| Tuple | 固定長の異種リテラル／引数／戻り値、ネスト、注釈、定数添字、`len`、真理値、固定長名前アンパック | `tests/test_tuple_phase4.py` |
+| タプル | 固定長と可変長、動的添字、スライス、連結、反復演算、反復、比較、アンパック | `tests/test_tuple_phase4.py`、`tests/test_builtin_types.py` |
+| その他の組み込み型 | `complex`、`bytes`、`bytearray`、`memoryview`、`range`、`slice`、`None`、オプショナル型注釈 | `tests/test_builtin_types.py` |
 | リスト | 異種および入れ子の要素、リテラル、内包表記、`list()`、添字とスライスによる読み書き・削除、反復、標準メソッド、引数と戻り値の同一性 | `tests/test_list.py` |
 | 集合 | `set` と `frozenset`、リテラルと内包表記、反復、集合演算、比較、標準メソッド | `tests/test_set.py` |
 | 辞書 | `**` 展開を含むリテラル、内包表記、`dict()`、キーによる読み書き、動的ビュー、マージ演算、標準メソッド | `tests/test_dict.py` |
 | 配列 | 4 種の数値 dtype、安全な添字、多次元 Strided アクセス、一次元反復、多次元全体の `sum`／`any`／`all` スカラーリダクション | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
-| 組み込み関数 | スカラ／文字列関数と、ネイティブ `math` の三角・平方根・指数・対数・分類・定数 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
+| Python 構文 | f 文字列、キーワード／可変長引数、CPython で実行するジェネレータ、例外処理、コンテキスト管理、パターンマッチ、非同期関数とクロージャ | `tests/test_python_syntax.py` |
+| 組み込み関数 | Python ランタイムによる `round`、`pow`、`min`／`max`、`sorted`、`map`、`filter`、`zip` などと、ネイティブの数値・文字列演算 | `tests/test_python_builtins.py`、`tests/test_numeric_phase3.py` |
 | 定数 | `@jit` 適用時に不変スカラ／文字列のグローバルおよびクロージャ値をキャプチャ | `tests/test_numeric_phase3.py` |
 | アノテーションとコールバック | スカラ／文字列アノテーション、`np.ndarray` dtype の遅延特化、型注釈付き `@reg` | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 検証 | パーサのソース位置保持、推論ルール検証、生成された LLVM モジュールのバリデーション | `tests/test_parser.py`、`tests/test_codegen.py` |
@@ -70,9 +72,11 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 
 リストは異なる型の要素、入れ子のリスト、`None` を保持できます。負の添字、スライス、要素やスライスへの代入および削除、starred および入れ子のアンパック、反復、包含判定、比較、連結、反復演算、`sort(key=..., reverse=...)` を含むすべての標準リストメソッドをサポートします。引数や戻り値には Python のリストそのものを使います。同じリストを参照する変数には変更が反映され、スライスと `copy()` は浅いコピーを作ります。`list[T]` はリストを表し、実行時に各要素の型は検査しません。関数の制御フローは LLVM がコンパイルし、リスト操作は Python ランタイムが実行します。
 
-`dict`、`set`、`frozenset`、`complex`、`bytes`、`bytearray`、`memoryview`、任意の Python オブジェクトは、独立した JIT 引数およびネイティブ型としては未対応です。`None` は戻り値や Python ランタイム内の値として使えますが、単独の引数や `int | None` などの共用体注釈は未対応です。`range(...)` はループや `list(range(n))` などの式で使えます。`range` および `slice` オブジェクトは引数として渡せません。tuple の動的添字、スライス、連結、比較、反復と、ネイティブ文字列の `split()` および `encode()` は未対応です。
+集合と辞書はコンストラクタ、内包表記、反復、演算、標準メソッドに対応します。辞書の挿入順と動的ビューは維持され、変更は呼び出し側から参照できます。
 
-ネイティブの `int` 引数は符号付き 64 ビット範囲に収まる必要があり、整数演算はオーバーフロー時にラップします。ネイティブの `bool` を Python に返すと、tuple の要素も含めて現在は `0` または `1` になります。Python のリスト、集合、辞書では `bool` 型が維持されます。NumPy 配列の引数は `int32`、`int64`、`float32`、`float64` のみ対応し、ndarray を直接返せません。未対応の引数型は `fallback=True` でもコンパイル前に `TypeError` になります。
+JIT は `complex`、`bytes`、`bytearray`、`memoryview`、`range`、`slice`、`None` を受け取り、返せます。複素数演算、バイナリシーケンスのメソッド、バッファビュー、範囲とスライスの操作は Python に従います。バッファとビューの同一性を保ち、書き込み可能なビューの変更は元のバッファに反映されます。`split()`、`encode()`、`format()` などの文字列メソッドも Python で実行できます。
+
+`int | None`、`Optional[int]`、`object` などの注釈は、実行時に Python オブジェクトを使用します。共用体の各メンバー型は検査しません。固定タプルの要素を含め、真偽値は `bool` 型で返します。ネイティブの `int` は符号付き 64 ビットで、演算がオーバーフローするとラップします。`object` と注釈した引数は Python の算術を使います。ネイティブの NumPy 配列は数値型 4 種類に対応し、直接返すことはできません。
 
 ### 数値と配列のセマンティクス
 
@@ -87,11 +91,17 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 
 文字列は長さ付き UTF-32 ABI を使用し、Unicode コードポイントと埋め込み NUL を保持します。一時値と戻り値は呼び出し単位の arena で管理されます。スライスは省略、正、負、動的な非ゼロ step に対応し、包含判定、Unicode 大小文字変換、空白除去、置換、文字種判定、`ord`／`chr` は静的サブセット内で Python の意味論に従います。
 
-Tuple は不変の固定長構造型で、要素型は特化シグネチャとマングル名に含まれます。ネイティブ値は形状固有構造へのポインタとして渡され、呼び出し単位の arena が保持するため、プラットフォーム依存の集約戻り ABI を回避できます。Python／JIT-to-JIT 境界でネストした数値／文字列 tuple を扱えます。
+固定タプルは要素型に応じた構造体で特化し、元の Python タプルがある場合はその参照を保持します。`tuple` と `tuple[T, ...]` の注釈は Python タプルを使います。動的添字、スライス、反復、スター付きアンパック、比較、シーケンス演算に対応します。
 
 各特化コードは、デコレートされた Python 関数の識別情報（identity）と型シグネチャから生成される一意の LLVM シンボルを使用します。そのため、同じ関数名を持つ別々の関数が誤ってキャッシュを共有してしまうことはありません。
 
-通常の `@jit` wrapper は元の Python シグネチャを使って位置／キーワード混在呼び出しと対応する型のデフォルト引数を扱えます。リスト、集合、辞書のデフォルト値は呼び出し間で同じオブジェクトを保持します。`compiled.specialize(*args)` は実行せずにコンパイルし、`runtime_stats(compiled)`、`inspect_specializations(compiled)`、`get_llvm_ir(compiled, *args)` は関数単位の統計、特化一覧、診断用 IR を提供します。統計にはコンパイル待機、シグネチャごとのコンパイル回数、軽量な失敗情報、文字列 runtime 呼び出し、登録 callback 呼び出しが含まれます。`JITContext` は Notebook や長時間プロセス向けに独立 engine、module/specialization 予算、明示的な close、およびその context で登録した callback の解放を提供します。
+`@jit` と `jit_from_source` は位置専用・キーワード専用引数、対応する型のデフォルト値、`*args` と `**kwargs` を扱えます。変更可能なデフォルト値は呼び出し間で同じオブジェクトです。コンパイル済みの関数からキーワードや展開した引数を渡せます。ソースから作る関数のデフォルト値は一度だけ評価され、関数作成後に追加された名前も含めて、渡された `namespace` 辞書からグローバル名を解決します。
+
+LLVM 関数内で f 文字列を利用でき、変換とネストした書式指定は Python の書式化プロトコルを使います。`round`、`pow`、`bin`、`oct`、`hex`、`ascii`、`callable`、`getattr`、`hasattr`、`map`、`filter`、`print` などは Python ランタイムを使います。`min` と `max` は `key` と `default`、`sorted` は `key` と `reverse`、`zip` は `strict` に対応します。
+
+ジェネレータ式、`yield`、`yield from`、`try`／`except`／`finally`、`with`、`match`、非同期構文、ネストした定義、ラムダ、または `locals()` など呼び出しフレームに依存する組み込み関数を直接使う場合は、関数全体を CPython で実行します。通常の JIT 入口から使え、LLVM 関数からも呼び出せます。`runtime_stats(compiled)['backend']` は `'llvm'` または `'cpython'` を返し、`python_features` で CPython の選択理由を確認できます。
+
+LLVM 関数では `compiled.specialize(*args, **kwargs)` で実行せずにコンパイルでき、`runtime_stats(compiled)` と `inspect_specializations(compiled)` で統計を、`get_llvm_ir(compiled, *args, **kwargs)` で IR を確認できます。統計にはコンパイル待機、シグネチャごとのコンパイル回数、失敗情報、文字列ランタイムと登録コールバックの呼び出しが含まれます。`JITContext` は独立したエンジン、モジュールと特化の上限、明示的なクローズ、および登録コールバックの解放を提供します。
 
 `fallback=True` では frontend、型推論、codegen が未対応の経路だけ元の Python 関数を実行します。`FallbackWarning` は `function`、`reason`、`error_type` を公開し、`fallback_warning` は既定の `"once"`、`"always"`、`"ignore"` から選べます。関数の特化上限、context のリソース上限、close 済み runtime、LLVM 内部エラーは fallback しません。文字列の index と比較はネイティブ UTF-32 経路です。`upper()`、`lower()` など複雑な Unicode 変換は引き続き Python runtime を呼び、その回数は `runtime_stats()['string_callbacks']` で確認できます。
 
@@ -216,6 +226,8 @@ uv run examples/example_mixed_types.py
 uv run examples/example_lists.py
 uv run examples/example_sets.py
 uv run examples/example_dicts.py
+uv run examples/example_builtin_types.py
+uv run examples/example_python_syntax.py
 
 ```
 
@@ -291,14 +303,13 @@ pyjiting/
 
 本プロジェクトは研究・教育を目的としたプロトタイプ実装であり、プロダクション環境での利用を想定したものではありません。主な制限事項は以下の通りです。
 
-* ガベージコレクション（GC）との統合はなく、静的に型付け可能な Python の一部サブセットのみをサポートします。
-* `for` は `range`、リスト、集合、辞書、文字列、一次元配列に対応します。コンパイル時に range の step が 0 と分かる場合はエラーになります。
+* LLVM コンパイルは静的に型付けできる Python の一部を対象とします。CPython で実行する関数には LLVM の特化や IR はありません。
+* `for` は `range`、リスト、集合、辞書、タプル、文字列、バイナリシーケンス、一次元配列に対応します。コンパイル時に range の step が 0 と分かる場合はエラーになります。
 * 実行時のゼロ除算は `ZeroDivisionError` を送出します。動的にステップ数が 0 となった range は、JIT のエラーハンドリング ABI 経由で `ValueError` を送出します。
-* void 以外の戻り値を持つ JIT 関数は、すべての制御フローパスで値を return する必要があります。
+* 具体的な戻り型の関数は、すべての制御フローパスで値を返します。オプショナル型、共用体、オブジェクト型の場合は暗黙に `None` を返せます。
 * 整数のべき乗（`**`）は、指数部がコンパイル時定数である必要があります（動的な負の指数は静的に戻り型を一意に決定できないため）。
 * `@reg` 関数はサポート対象のスカラ型または文字列型アノテーションを完全に備える必要があります。コールバック例外は最外層の Python 呼び出し地点で再送出され、ctypes ABI を跨ぎません。
-* 通常の `@jit` は対応する型のデフォルト引数と外側のキーワード実引数をサポートします。キーワード専用仮引数と可変長仮引数は未対応です。JIT 関数内ではリストのソート、`dict()`、`dict.update()` でキーワード引数を使えます。
-* 可変グローバル、多次元配列の反復、axis リダクション、NumPy 配列全体の演算は未対応です。
+* LLVM 関数にはグローバルオブジェクト、型注釈、多次元配列の反復、axis リダクション、NumPy 配列全体の演算に制約があります。
 
 # 謝辞
 

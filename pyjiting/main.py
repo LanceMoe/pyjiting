@@ -1,7 +1,8 @@
 # pyright: reportArgumentType=false
 
 import ast as py_ast
-from collections.abc import Mapping, MappingView
+import __future__
+from collections.abc import Iterator, Mapping, MappingView
 import copy
 import functools
 import hashlib
@@ -28,8 +29,8 @@ from .registry import (callback_count, callback_stats as registered_callback_sta
                        get as get_registered, register, unregister,
                        registration_id, signatures)
 from .string_runtime import callback_stats, literal_count
-from .types import (TupleType, bool_t, contains_array, dict_t, double64_t, float32_t,
-                    frozenset_t, int32_t, int64_t, list_t, make_array_type, object_t, set_t, str_t)
+from .types import (BOXED_TYPES, TupleType, bool_t, contains_array, double64_t, float32_t,
+                    int32_t, int64_t, make_array_type, object_t, str_t, tuple_t)
 
 
 DEFAULT_MAX_SPECIALIZATIONS = 64
@@ -106,17 +107,20 @@ def reg(fn: Callable[P, R]) -> Callable[P, R]:
     return register(fn)
 
 
-def arg_pytype(arg):
-    if isinstance(arg, dict):
-        return dict_t
-    if isinstance(arg, list):
-        return list_t
-    if isinstance(arg, set):
-        return set_t
-    if isinstance(arg, frozenset):
-        return frozenset_t
+class _UnsupportedType(TypeError):
+    pass
+
+
+def arg_pytype(arg, annotation=None):
+    if annotation == object_t:
+        return object_t
     if isinstance(arg, tuple):
-        elements = [arg_pytype(element) for element in arg]
+        if annotation == tuple_t or type(arg) is not tuple:
+            return tuple_t
+        try:
+            elements = [arg_pytype(element) for element in arg]
+        except _UnsupportedType:
+            return tuple_t
         if any(contains_array(element) for element in elements):
             raise TypeError('ndarray elements inside tuples are not supported')
         return TupleType(elements)
@@ -133,12 +137,19 @@ def arg_pytype(arg):
     if isinstance(arg, np.floating) or isinstance(arg, float): return double64_t
     if isinstance(arg, int) and -sys.maxsize - 1 <= arg <= sys.maxsize: return int64_t
     if isinstance(arg, str): return str_t
-    if callable(arg) or isinstance(arg, (Mapping, MappingView)): return object_t
-    raise TypeError(f'Unsupported type: {type(arg).__name__}')
+    for kind, core_type in BOXED_TYPES.items():
+        if isinstance(arg, kind):
+            return core_type
+    if callable(arg) or isinstance(arg, (Iterator, Mapping, MappingView)): return object_t
+    raise _UnsupportedType(f'Unsupported type: {type(arg).__name__}')
 
 
 def typeinfer(tree, arg_types, registry=None, jit_resolver=None, reg_resolver=None):
     return TypeInferencer(arg_types, registry or signatures(), jit_resolver, reg_resolver).visit(tree)
+
+
+def _argument_types(tree, args):
+    return [arg_pytype(value, parameter.annotation) for value, parameter in zip(args, tree.args)]
 
 
 def _fingerprint_value(value):
@@ -189,9 +200,12 @@ def native_symbol(tree, arg_types):
 
 
 def visible_binding(tree, name):
-    bindings = getattr(tree, 'bindings', {})
-    if name in bindings:
-        return bindings[name]
+    cell = tree.closure_cells.get(name)
+    if cell is not None:
+        try:
+            return cell.cell_contents
+        except ValueError:
+            return None
     return getattr(tree, 'namespace', {}).get(name)
 
 
@@ -248,6 +262,9 @@ def compile_specialization(tree, arg_types):
             if callee_tree is None: return None, None
             if getattr(callee_tree, 'runtime_state', default_runtime) is not state:
                 raise InferError('JIT functions from different runtime contexts cannot call each other', tree)
+            if (callee_tree.python_features or
+                    getattr(callee_tree, 'direct_positional_count', None) != len(call_arg_types)):
+                return None, candidate
             compile_specialization(callee_tree, call_arg_types)
             callee_key = specialization_key(callee_tree, call_arg_types)
             with state.cache_lock:
@@ -277,7 +294,7 @@ def compile_specialization(tree, arg_types):
             pass_builder.getModulePassManager().run(binding_module, pass_builder)
             optimized_ir = str(binding_module)
             state.engine.add_module(binding_module); state.engine.finalize_object()
-            wrapper = wrap_module(arg_types, llfunc, state.engine)
+            wrapper = wrap_module(arg_types, llfunc, state.engine, function_type.return_type)
         with state.cache_lock:
             state.retained_modules.append(binding_module)
             state.function_signatures[key] = function_type
@@ -337,38 +354,38 @@ def emit_fallback_warning(policy, warned, function, error, *, stacklevel):
     return warned or policy != 'ignore'
 
 
-def _wrapper_for_tree(tree, fn=None, fallback=False, max_specializations=DEFAULT_MAX_SPECIALIZATIONS,
+def _wrapper_for_tree(tree, fn, fallback=False, max_specializations=DEFAULT_MAX_SPECIALIZATIONS,
                       fallback_warning='once'):
     validate_specialization_limit(max_specializations)
     validate_fallback_warning(fallback_warning)
     tree.max_specializations = max_specializations
     ensure_compilation_unit(tree)
     warned = False
+    state = tree.runtime_state
+    signature = inspect.signature(fn)
+    python_features = tree.python_features
+    tree.python_calls = 0
 
     def warn_fallback(error):
         nonlocal warned
         warned = emit_fallback_warning(
             fallback_warning, warned, tree.fname, error, stacklevel=3)
 
-    signature = inspect.signature(fn) if fn is not None else None
-    if signature is not None:
-        for parameter in signature.parameters.values():
+    if not python_features:
+        for parameter, declared in zip(signature.parameters.values(), tree.args):
             if parameter.default is not inspect.Parameter.empty:
                 try:
-                    arg_pytype(parameter.default)
+                    arg_pytype(parameter.default, declared.annotation)
                 except TypeError as error:
                     raise CompileError(
                         f'unsupported default value for parameter {parameter.name!r}: {error}') from error
 
     def normalize_args(args, kwargs):
-        if signature is None:
-            if kwargs:
-                raise TypeError('jit.from_source calls do not support keyword arguments')
-            return args
         try:
             bound = signature.bind(*args, **kwargs)
         except TypeError:
-            if not kwargs:
+            if (not kwargs and tree.direct_positional_count is not None
+                    and all(p.default is inspect.Parameter.empty for p in signature.parameters.values())):
                 raise TypeError(
                     f'{tree.fname}() takes {len(tree.args)} positional arguments but {len(args)} were given') from None
             raise
@@ -376,46 +393,50 @@ def _wrapper_for_tree(tree, fn=None, fallback=False, max_specializations=DEFAULT
         return tuple(bound.arguments[name] for name in signature.parameters)
 
     def wrapper(*args, **kwargs):
-        state = getattr(tree, 'runtime_state', default_runtime)
         state.ensure_open()
-        args = normalize_args(args, kwargs)
-        if len(args) != len(tree.args):
-            raise TypeError(f'{tree.fname}() takes {len(tree.args)} positional arguments but {len(args)} were given')
+        if python_features:
+            result = fn(*args, **kwargs)
+            with state.cache_lock:
+                tree.python_calls += 1
+            return result
+        normalized = normalize_args(args, kwargs)
+        arg_types = _argument_types(tree, normalized)
         try:
-            compiled = compile_specialization(tree, [arg_pytype(arg) for arg in args])
+            compiled = compile_specialization(tree, arg_types)
         except CompileError as error:
             if isinstance(error, SpecializationLimitError):
                 raise
-            if not fallback or fn is None:
+            if not fallback:
                 raise
             warn_fallback(error)
-            return fn(*args)
-        result = compiled(*args)
-        key = specialization_key(tree, [arg_pytype(arg) for arg in args])
+            return fn(*args, **kwargs)
+        result = compiled(*normalized)
+        key = specialization_key(tree, arg_types)
         with state.cache_lock:
             if key in state.specialization_metrics:
                 state.specialization_metrics[key]['calls'] += 1
         return result
 
-    if fn is not None:
-        functools.update_wrapper(wrapper, fn)
-    else:
-        wrapper.__name__ = tree.fname
+    functools.update_wrapper(wrapper, fn)
+    wrapper.__signature__ = signature
+    if inspect.iscoroutinefunction(fn):
+        inspect.markcoroutinefunction(wrapper)
     wrapper.__pyjiting_tree__ = tree
 
     def specialize(*args, **kwargs):
+        state.ensure_open()
+        if python_features:
+            raise CompileError(f'{tree.fname} uses the CPython backend and has no LLVM specialization')
         normalized = normalize_args(args, kwargs)
-        if len(normalized) != len(tree.args):
-            raise TypeError(f'{tree.fname}() takes {len(tree.args)} positional arguments but {len(normalized)} were given')
-        arg_types = [arg_pytype(arg) for arg in normalized]
+        arg_types = _argument_types(tree, normalized)
         compile_specialization(tree, arg_types)
         key = specialization_key(tree, arg_types)
-        state = getattr(tree, 'runtime_state', default_runtime)
         with state.cache_lock:
             return MappingProxyType(dict(state.specialization_metrics[key]))
 
     wrapper.specialize = specialize
     wrapper.warmup = specialize
+    wrapper.__pyjiting_normalize_args__ = normalize_args
     return wrapper
 
 
@@ -429,6 +450,9 @@ def _jit_with_state(state, fn: Any = None, *, fallback: bool = False,
         return lambda decorated: _jit_with_state(
             state, decorated, fallback=fallback, max_specializations=max_specializations,
             fallback_warning=fallback_warning)
+    if isinstance(fn, str):
+        return _jit_from_source_with_state(state, fn, max_specializations=max_specializations,
+                                           fallback=fallback, fallback_warning=fallback_warning)
     try:
         tree = ASTVisitor()(fn)
     except CompileError as error:
@@ -479,14 +503,30 @@ def jit(fn: Any = None, *, fallback: bool = False,
 
 
 def _jit_from_source_with_state(state, source, *, namespace=None,
-                                max_specializations=DEFAULT_MAX_SPECIALIZATIONS):
+                                max_specializations=DEFAULT_MAX_SPECIALIZATIONS,
+                                fallback=False, fallback_warning='once'):
     state.ensure_open()
     validate_specialization_limit(max_specializations)
-    tree = ASTVisitor()(source)
+    tree = ASTVisitor()(source, namespace=namespace)
     tree.symbol = f'jit_source_{hashlib.sha256(source.encode()).hexdigest()[:16]}'
     tree.namespace = namespace if namespace is not None else {}
     tree.runtime_state = state
-    return _wrapper_for_tree(tree, max_specializations=max_specializations)
+    # Use Python to evaluate defaults once and create the real source signature.
+    # The public entry point owns decoration and annotations are read by the parser.
+    definition = copy.copy(tree.definition)
+    definition.decorator_list = []
+    imports = py_ast.Module(body=tree.source_imports, type_ignores=[])
+    if imports.body:
+        exec(compile(imports, '<jit source>', 'exec', dont_inherit=True), tree.namespace)
+    locals_ = {}
+    module = py_ast.Module(body=[definition], type_ignores=[])
+    executable = compile(module, '<jit source>', 'exec', flags=__future__.annotations.compiler_flag,
+                         dont_inherit=True)
+    exec(executable, tree.namespace, locals_)
+    fn = locals_[tree.fname]
+    wrapper = _wrapper_for_tree(tree, fn, fallback, max_specializations, fallback_warning)
+    tree.namespace.setdefault(tree.fname, wrapper)
+    return wrapper
 
 
 def jit_from_source(source, *, namespace=None, max_specializations=DEFAULT_MAX_SPECIALIZATIONS):
@@ -509,12 +549,14 @@ def runtime_stats(function=None):
             unit_id = ensure_compilation_unit(tree)
             keys = [key for key in state.function_cache if key[0] == unit_id]
         units = {key[0] for key in keys}
-        if function is not None:
+        if tree is not None:
             return {
                 'specializations': len(keys),
                 'compilation_units': len(units),
                 'compile_time_ns': sum(state.specialization_metrics[key]['compile_time_ns'] for key in keys),
-                'calls': sum(state.specialization_metrics[key]['calls'] for key in keys),
+                'calls': tree.python_calls + sum(state.specialization_metrics[key]['calls'] for key in keys),
+                'backend': 'cpython' if tree.python_features else 'llvm',
+                'python_features': tree.python_features,
                 'signatures': tuple(MappingProxyType(dict(state.specialization_metrics[key])) for key in keys),
                 'failures': tuple(
                     MappingProxyType(dict(details))
@@ -570,11 +612,13 @@ def inspect_specializations(function):
     return runtime_stats(function)['signatures']
 
 
-def get_llvm_ir(function, *sample_args, optimized=False):
+def get_llvm_ir(function, *sample_args, optimized=False, **sample_kwargs):
     tree = getattr(function, '__pyjiting_tree__', None)
     if tree is None:
         raise TypeError('get_llvm_ir expects a @jit function')
-    arg_types = [arg_pytype(arg) for arg in sample_args]
+    if tree.python_features:
+        raise CompileError(f'{tree.fname} uses the CPython backend and has no LLVM IR')
+    arg_types = _argument_types(tree, function.__pyjiting_normalize_args__(sample_args, sample_kwargs))
     compile_specialization(tree, arg_types)
     key = specialization_key(tree, arg_types)
     state = getattr(tree, 'runtime_state', default_runtime)

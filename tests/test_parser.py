@@ -60,23 +60,9 @@ def test_parser_rejects_loop_control_outside_a_loop(statement):
 def test_parser_rejects_unknown_annotations_with_a_location():
     with pytest.raises(CompileError, match=r'line 2:.*unsupported annotation'):
         ASTVisitor()('''
-            def bad(value: complex):
+            def bad(value: UnknownType):
                 return value
         ''')
-
-
-@pytest.mark.parametrize(
-    ('source', 'message'),
-    [
-        ('def defaulted(value=1):\n    return value', 'default parameters require the @jit function decorator'),
-        ('def keyword_only(*, value):\n    return value', 'keyword-only and variadic parameters'),
-        ('def variadic(*values):\n    return 0', 'keyword-only and variadic parameters'),
-        ('def caller(value):\n    return callee(value=value)', 'keyword arguments are not supported'),
-    ],
-)
-def test_parser_rejects_parameter_and_call_forms_outside_the_subset(source, message):
-    with pytest.raises(CompileError, match=message):
-        ASTVisitor()(source)
 
 
 def test_none_return_annotation_and_bare_return_are_supported():

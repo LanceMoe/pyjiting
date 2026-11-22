@@ -111,5 +111,8 @@ def test_new_string_intrinsics_reject_invalid_static_types_and_arities():
 
     with pytest.raises(InferError, match='requires string operands'):
         invalid_membership('x')
-    with pytest.raises(InferError, match='replace expects two string arguments'):
+    with pytest.raises(TypeError) as expected:
+        'x'.replace('x')  # pyright: ignore[reportCallIssue]
+    with pytest.raises(TypeError) as actual:
         invalid_replace('x')
+    assert actual.value.args == expected.value.args

@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 
 from pyjiting import jit
-from pyjiting.errors import CompileError, InferError
 from pyjiting.ll_types import mangler
 from pyjiting.main import arg_pytype
 from pyjiting.types import TupleType, double64_t, int64_t, str_t
@@ -80,7 +79,7 @@ def test_tuple_specialization_type_and_mangler_are_structural():
     assert mangler('sample', [ty]) == 'sample__tuple_i64_str_tuple_f64_end_end'
 
 
-def test_tuple_invalid_index_unpack_and_array_elements_are_rejected():
+def test_dynamic_index_and_python_unpacking_errors():
     @jit
     def dynamic_index(value, index):
         return value[index]
@@ -90,21 +89,32 @@ def test_tuple_invalid_index_unpack_and_array_elements_are_rejected():
         left, right, extra = value
         return left
 
-    with pytest.raises(InferError, match='compile-time integer'):
-        dynamic_index((1, 2), 0)
-    with pytest.raises(InferError, match='cannot unpack tuple of length 2 into 3 names'):
+    assert dynamic_index((1, 'two'), -1) == 'two'
+    with pytest.raises(IndexError, match='tuple index out of range'):
+        dynamic_index((1, 2), 9)
+    with pytest.raises(ValueError, match='not enough values'):
         wrong_unpack((1, 2))
+
+
+def test_fixed_tuple_arrays_remain_unsupported():
     with pytest.raises(TypeError, match='ndarray elements inside tuples'):
         nested_roundtrip((np.arange(2),))
     with pytest.raises(TypeError, match='ndarray elements inside tuples'):
         nested_roundtrip(((np.arange(2),),))
 
 
-def test_tuple_annotation_rejects_variadic_shape():
-    with pytest.raises(CompileError, match='unsupported annotation'):
-        @jit
-        def variadic(value: tuple[int, ...]):
-            return value
+def test_tuple_annotations_preserve_identity_and_accept_dynamic_lengths():
+    @jit
+    def variadic(value: tuple[int, ...]) -> tuple[int, ...]:
+        return value
+
+    @jit
+    def structural(value: tuple[int, int]) -> tuple[int, int]:
+        return value[:]
+
+    pair = (1, 2)
+    assert variadic(pair) is pair and variadic(()) == ()
+    assert structural(pair) is pair
 
 
 def test_tuple_generated_module_verifies():

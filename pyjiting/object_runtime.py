@@ -1,10 +1,13 @@
 """Python objects retained by the current JIT dispatch."""
 
+import builtins
 import ctypes
-from functools import lru_cache
 import operator
+from types import FunctionType
 from typing import Any
 
+from .errors import InferError
+from .intrinsics import OBJECT_BUILTINS, OBJECT_CLASS_METHODS, OBJECT_CONSTRUCTORS
 from .string_runtime import ErrorPointer, StringPointer, _callback_failed, keep_alive, make_string, to_python
 
 
@@ -52,17 +55,51 @@ def _as_string(value):
     return make_string(value)
 
 
-@lru_cache(maxsize=128)
-def _key_code(source):
-    return compile(source, '<jit sort key>', 'eval')
+def _check_tuple_size(value, size):
+    _require_type(value, tuple)
+    if tuple.__len__(value) != size:
+        raise TypeError(f'expected tuple of length {size}, got {tuple.__len__(value)}')
 
 
-def _sort_key(spec, *values):
-    source, names, namespace, bindings = spec
-    scope = dict(namespace)
-    scope.update(bindings)
-    scope.update(zip(names, values))
-    return eval(_key_code(source), scope)
+def _load_global(scope, name):
+    namespace, closure_cells = scope
+    if name in closure_cells:
+        try:
+            return closure_cells[name].cell_contents
+        except ValueError:
+            raise NameError(f'free variable {name!r} has no value', name=name) from None
+    if name in namespace:
+        return namespace[name]
+    available = namespace.get('__builtins__', builtins)
+    try:
+        return available[name] if isinstance(available, dict) else getattr(available, name)
+    except (KeyError, AttributeError):
+        raise NameError(f"name {name!r} is not defined", name=name) from None
+
+
+def _check_call_context(function, state):
+    if isinstance(function, FunctionType):
+        tree = getattr(function, '__pyjiting_tree__', None)
+        if tree is not None and tree.runtime_state is not state:
+            raise InferError('JIT functions from different runtime contexts cannot call each other')
+
+
+def _format_convert(value, conversion):
+    if conversion == ord('s'):
+        return str(value)
+    if conversion == ord('r'):
+        return repr(value)
+    if conversion == ord('a'):
+        return ascii(value)
+    return value
+
+
+def _format_part(value, spec, conversion):
+    return make_string(format(_format_convert(value, conversion), to_python(spec)))
+
+
+def _join_strings(*parts):
+    return make_string(''.join(to_python(part) for part in parts))
 
 
 def _unpack(value, size, star):
@@ -113,16 +150,13 @@ def _check_keyword(function, target, key):
         raise TypeError(f'{name}() got multiple values for keyword argument {key!r}')
 
 
-def _set_keyword(function, target, key, value):
-    _check_keyword(function, target, key)
-    target[key] = value
-
-
 _primitives = {
     'add#': operator.add, 'sub#': operator.sub, 'mult#': operator.mul,
     'div#': operator.truediv, 'floordiv#': operator.floordiv, 'mod#': operator.mod,
     'pow#': operator.pow, 'neg#': operator.neg,
     'bitor#': operator.or_, 'bitand#': operator.and_, 'bitxor#': operator.xor,
+    'lshift#': operator.lshift, 'rshift#': operator.rshift,
+    'pos#': operator.pos, 'invert#': operator.invert,
     'eq#': operator.eq, 'ne#': operator.ne, 'lt#': operator.lt,
     'le#': operator.le, 'gt#': operator.gt, 'ge#': operator.ge,
     'in#': lambda item, value: operator.contains(value, item),
@@ -134,30 +168,31 @@ _inplace_primitives = {
     'div#': operator.itruediv, 'floordiv#': operator.ifloordiv,
     'mod#': operator.imod, 'pow#': operator.ipow,
     'bitor#': operator.ior, 'bitand#': operator.iand, 'bitxor#': operator.ixor,
+    'lshift#': operator.ilshift, 'rshift#': operator.irshift,
 }
 _operations = {
+    **OBJECT_CONSTRUCTORS, **OBJECT_CLASS_METHODS, **OBJECT_BUILTINS,
     **_primitives,
     **{f'inplace:{name}': function for name, function in _inplace_primitives.items()},
     'none': lambda: None,
     'getitem': operator.getitem, 'setitem': operator.setitem, 'delitem': operator.delitem,
-    'slice': slice, 'list': list, 'tuple': tuple, 'len': len, 'bool': bool,
+    'list': list, 'len': len, 'bool': bool,
     'append': list.append, 'extend': list.extend, 'unpack': _unpack,
     'set': set, 'frozenset': frozenset, 'set_add': set.add, 'set_update': set.update,
     'dict': dict, 'dict.fromkeys': dict.fromkeys, 'dict_unpack': _dict_unpack,
     'pair': lambda key, value: (key, value),
-    'getattr': getattr, 'merge_keywords': _merge_keywords, 'set_keyword': _set_keyword,
+    'getattr': getattr, 'merge_keywords': _merge_keywords,
     'call': lambda function, args, kwargs: function(*args, **kwargs),
     'int': int, 'float': float, 'str': str,
     'sum': sum, 'min': min, 'max': max, 'any': any, 'all': all, 'abs': abs,
-    'chr': chr, 'ord': ord, 'iter': iter, 'iter_next': _next, 'next': next, 'hash': hash, 'range': range,
-    'enumerate': enumerate, 'zip': zip, 'reversed': reversed,
+    'chr': chr, 'ord': ord, 'iter': iter, 'iter_next': _next, 'next': next, 'hash': hash,
+    'enumerate': enumerate, 'zip': zip, 'reversed': reversed, 'sorted': sorted,
     'box_int': int, 'box_float': float, 'box_bool': bool, 'box_str': to_python,
     'unbox_int': _as_int, 'unbox_float': float, 'unbox_str': _as_string,
-    'as_list': lambda value: _require_type(value, list),
-    'as_set': lambda value: _require_type(value, set),
-    'as_frozenset': lambda value: _require_type(value, frozenset),
-    'as_dict': lambda value: _require_type(value, dict),
-    'sort_key': _sort_key,
+    'require_type': _require_type,
+    'check_tuple_size': _check_tuple_size, 'tuple_item': tuple.__getitem__,
+    'load_global': _load_global, 'check_call_context': _check_call_context,
+    'format_convert': _format_convert, 'format_part': _format_part, 'join_strings': _join_strings,
 }
 
 
@@ -165,8 +200,6 @@ def callback_address(name, output_type, arg_types, keywords=()):
     key = (name, output_type, tuple(arg_types), keywords)
     callback = _callbacks.get(key)
     if callback is None:
-        packed = name.startswith('packed:')
-        call_name = name.removeprefix('packed:')
         if name.startswith('builtin:'):
             function = _operations[name.removeprefix('builtin:')]
 
@@ -174,19 +207,21 @@ def callback_address(name, output_type, arg_types, keywords=()):
                 return function
 
             operation = builtin_operation
-        elif packed or call_name.startswith('method:') or call_name == 'sorted' or keywords:
-            method = call_name.removeprefix('method:')
+        elif name == 'invoke' or name.startswith('method:') or keywords:
+            method = name.removeprefix('method:')
 
             def operation(*args):
                 positional_count = len(args) - len(keywords)
                 positional = args[:positional_count]
                 kwargs = dict(zip(keywords, args[positional_count:]))
-                if call_name.startswith('method:'):
+                if name == 'invoke':
+                    function, *positional = positional
+                elif name.startswith('method:'):
                     function = getattr(positional[0], method)
                     positional = positional[1:]
                 else:
-                    function = sorted if call_name == 'sorted' else _operations[call_name]
-                return function(*(positional[0] if packed else positional), **kwargs)
+                    function = _operations[name]
+                return function(*positional, **kwargs)
         else:
             operation = _operations[name]
 

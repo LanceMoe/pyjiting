@@ -94,7 +94,27 @@ list_t = BaseType('List')
 set_t = BaseType('Set')
 frozenset_t = BaseType('FrozenSet')
 dict_t = BaseType('Dict')
+tuple_t = BaseType('PythonTuple')
+complex_t = BaseType('Complex')
+bytes_t = BaseType('Bytes')
+bytearray_t = BaseType('ByteArray')
+memoryview_t = BaseType('MemoryView')
+range_t = BaseType('Range')
+slice_t = BaseType('Slice')
+none_t = BaseType('None')
 object_t = BaseType('Object')
+
+BOXED_TYPES = {
+    list: list_t, set: set_t, frozenset: frozenset_t, dict: dict_t, tuple: tuple_t,
+    complex: complex_t, bytes: bytes_t, bytearray: bytearray_t, memoryview: memoryview_t,
+    range: range_t, slice: slice_t, type(None): none_t,
+}
+PYTHON_TYPES = {
+    **{core_type: python_type for python_type, core_type in BOXED_TYPES.items()},
+    str_t: str, bool_t: bool, int32_t: int, int64_t: int, float32_t: float, double64_t: float,
+    object_t: object,
+}
+BOXED_CORE_TYPES = frozenset(BOXED_TYPES.values()) | {object_t}
 
 ptr_t = PointerType
 
@@ -158,7 +178,7 @@ def is_string(ty):
 
 
 def is_boxed(ty):
-    return ty in (list_t, set_t, frozenset_t, dict_t, object_t)
+    return ty in BOXED_CORE_TYPES
 
 
 def is_boxable(ty):

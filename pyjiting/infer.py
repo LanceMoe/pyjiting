@@ -1,16 +1,25 @@
 from . import ast as core
 from .errors import InferError
 from .intrinsics import (LIST_INTEGER_METHODS, LIST_RETURNING_METHODS, MATH_INTRINSICS, SET_RETURNING_METHODS,
-                         STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS)
-from .types import (FuncType, TupleType, bool_t, can_widen, contains_array, dict_t,
+                         OBJECT_BUILTINS, OBJECT_CONSTRUCTORS, STRING_INTRINSICS,
+                         STRING_PREDICATES, STRING_TRANSFORMS)
+from .types import (BOXED_TYPES, FuncType, TupleType, bool_t, bytearray_t, bytes_t, can_widen,
+                    complex_t, contains_array, dict_t,
                     double64_t, float32_t, int32_t, int64_t, is_array, is_integer,
                     is_boxable, is_boxed, is_numeric, is_string, is_truthy_type, is_tuple,
-                    frozenset_t, list_t, object_t, promote_numeric, set_t, shape_t, str_t, void_t)
+                    frozenset_t, list_t, memoryview_t, none_t, object_t, promote_numeric, range_t,
+                    set_t, shape_t, slice_t, str_t, tuple_t, void_t)
 
 
 _BOXED_BUILTINS = {'list': list_t, 'set': set_t, 'frozenset': frozenset_t,
                    'dict': dict_t, 'dict.fromkeys': dict_t,
-                   'len': int64_t, 'ord': int64_t, 'sorted': list_t}
+                   'len': int64_t, 'ord': int64_t, 'sorted': list_t,
+                   'bytes.fromhex': bytes_t, 'bytearray.fromhex': bytearray_t, 'int.from_bytes': object_t,
+                   **{name: BOXED_TYPES[kind] for name, kind in OBJECT_CONSTRUCTORS.items()}}
+
+
+def _tuple_like(ty):
+    return is_tuple(ty) or ty == tuple_t
 
 
 class UnderDetermined(InferError):
@@ -35,7 +44,11 @@ class TypeInferencer:
     def _coerce(self, actual, expected, node):
         if actual == expected: return expected
         if can_widen(actual, expected): return expected
-        if expected == object_t and is_boxable(actual): return expected
+        if expected == void_t and actual == none_t: return expected
+        if expected == object_t and actual == void_t: return expected
+        if expected == object_t and (is_boxable(actual) or is_array(actual)): return expected
+        if expected == tuple_t and is_tuple(actual): return expected
+        if is_tuple(expected) and actual in (tuple_t, object_t): return expected
         if actual == object_t and (is_numeric(expected) or is_boxed(expected) or expected == str_t):
             return expected
         raise InferError(f'cannot use {actual} where {expected} is required', node)
@@ -67,7 +80,10 @@ class TypeInferencer:
         return node.type
 
     def visit_Fun(self, node):
+        if node.python_features:
+            raise InferError(f'{node.fname} uses the CPython backend', node)
         self.org_func_name = node.fname
+        self.return_annotation = node.return_annotation
         if self.arg_types is None:
             if any(arg.annotation is None for arg in node.args):
                 raise UnderDetermined('function arguments require a call specialization or annotations', node)
@@ -83,7 +99,7 @@ class TypeInferencer:
         if node.return_annotation: self.return_type = self._coerce(self.return_type, node.return_annotation, node)
         if contains_array(self.return_type):
             raise InferError('ndarray return values are not supported', node)
-        if self.return_type != void_t and not self._always_returns(node.body):
+        if self.return_type != void_t and node.return_annotation != object_t and not self._always_returns(node.body):
             raise InferError('non-Void function has a path without return', node)
         return FuncType(args=self.arg_types, return_type=self.return_type)
 
@@ -110,7 +126,11 @@ class TypeInferencer:
     def visit_LitFloat(self, node): node.type = node.literal_type or double64_t; return node.type
     def visit_LitBool(self, node): node.type = bool_t; return node.type
     def visit_LitStr(self, node): node.type = str_t; return node.type
-    def visit_LitNone(self, node): node.type = object_t; return node.type
+    def visit_LitNone(self, node): node.type = none_t; return node.type
+
+    def visit_LitObject(self, node):
+        node.type = BOXED_TYPES.get(type(node.value), object_t)
+        return node.type
 
     def visit_LitList(self, node):
         self._boxed_types([self.visit(item) for item in node.elements], node)
@@ -143,12 +163,30 @@ class TypeInferencer:
         self.env = before
         return node.type
 
-    def visit_SortKey(self, node):
-        self._boxed_types([self.visit(item) for item in node.values], node)
+    def visit_Global(self, node):
         node.type = object_t
         return object_t
+
+    def visit_JoinedStr(self, node):
+        for part in node.parts:
+            self.visit(part)
+        node.type = str_t
+        return str_t
+
+    def visit_FormattedValue(self, node):
+        self._boxed_types([self.visit(node.value)], node)
+        if node.format_spec is not None:
+            self.visit(node.format_spec)
+        node.type = str_t
+        return str_t
+
     def visit_LitTuple(self, node):
-        node.type = TupleType([self.visit(element) for element in node.elements])
+        elements = [self.visit(element) for element in node.elements]
+        if any(isinstance(element, core.Starred) for element in node.elements):
+            self._boxed_types(elements, node)
+            node.type = tuple_t
+        else:
+            node.type = TupleType(elements)
         return node.type
 
     def visit_Var(self, node):
@@ -165,15 +203,14 @@ class TypeInferencer:
 
     def visit_UnpackAssign(self, node):
         value_ty = self.visit(node.value)
-        node.boxed = is_boxed(value_ty) or node.star is not None and is_boxable(value_ty)
+        node.boxed = (is_boxed(value_ty) or node.star is not None and is_boxable(value_ty)
+                      or is_tuple(value_ty) and len(node.refs) != len(value_ty.elements))
         if node.boxed:
             source_types = [object_t] * len(node.refs)
             if node.star is not None:
                 source_types[node.star] = list_t
         elif not is_tuple(value_ty):
             raise InferError('unpacking requires a tuple or an iterable Python object', node.value)
-        elif len(node.refs) != len(value_ty.elements):
-            raise InferError(f'cannot unpack tuple of length {len(value_ty.elements)} into {len(node.refs)} names', node)
         else:
             source_types = list(value_ty.elements)
         node.source_types, node.ref_types = source_types, []
@@ -237,16 +274,21 @@ class TypeInferencer:
         value_ty = self.visit(node.value)
         if is_boxed(value_ty):
             self._boxed_subscript(node)
-            node.type = list_t if (value_ty == list_t and not node.tuple_key
-                                   and isinstance(node.indices[0], core.Slice)) else object_t
+            slicing = not node.tuple_key and isinstance(node.indices[0], core.Slice)
+            node.type = value_ty if slicing and value_ty in (
+                list_t, tuple_t, bytes_t, bytearray_t, memoryview_t, range_t) else object_t
             return node.type
         if is_tuple(value_ty):
-            if node.tuple_key or len(node.indices) != 1: raise InferError('tuple expects one index', node)
-            index = core.integer_constant_value(node.indices[0])
-            if index is None: raise InferError('tuple index must be a compile-time integer', node.indices[0])
-            if index < 0: index += len(value_ty.elements)
-            if not 0 <= index < len(value_ty.elements): raise InferError('tuple index out of range', node.indices[0])
-            node.tuple_index = index; node.type = value_ty.elements[index]; return node.type
+            if not node.tuple_key:
+                index = core.integer_constant_value(node.indices[0])
+                if index is not None and -len(value_ty.elements) <= index < len(value_ty.elements):
+                    node.tuple_index = index % len(value_ty.elements)
+                    node.type = value_ty.elements[node.tuple_index]
+                    return node.type
+            self._boxed_subscript(node)
+            node.boxed = True
+            node.type = tuple_t if not node.tuple_key and isinstance(node.indices[0], core.Slice) else object_t
+            return node.type
         if is_string(value_ty):
             if node.tuple_key or len(node.indices) != 1: raise InferError('string expects one index', node)
             index = node.indices[0]
@@ -271,11 +313,15 @@ class TypeInferencer:
 
     def visit_Prim(self, node):
         if node.fn == 'shape#':
-            if not is_array(self.visit(node.args[0])): raise InferError('shape requires an array', node)
+            actual = self.visit(node.args[0])
+            if is_boxed(actual):
+                node.type = object_t
+                return node.type
+            if not is_array(actual): raise InferError('shape requires an array', node)
             node.type = shape_t; return node.type
-        if node.fn in core.ARITHMETIC_OPS | core.BITWISE_OPS:
+        if node.fn in core.ARITHMETIC_OPS | core.BITWISE_OPS | {'lshift#', 'rshift#'}:
             left = self.visit(node.args[0]); right = self.visit(node.args[1])
-            if is_boxed(left) or is_boxed(right):
+            if is_boxed(left) or is_boxed(right) or _tuple_like(left) or _tuple_like(right) or node.fn in ('lshift#', 'rshift#'):
                 self._boxed_types([left, right], node)
                 node.operand_type = object_t
                 node.type = list_t if (
@@ -288,6 +334,11 @@ class TypeInferencer:
                     node.type = left
                 if node.fn == 'bitor#' and left == dict_t and (right == dict_t or node.inplace):
                     node.type = dict_t
+                if ((node.fn == 'add#' and _tuple_like(left) and _tuple_like(right))
+                        or (node.fn == 'mult#' and (_tuple_like(left) or _tuple_like(right)))):
+                    node.type = tuple_t
+                if complex_t in (left, right) and node.fn in ('add#', 'sub#', 'mult#', 'div#', 'pow#'):
+                    node.type = complex_t
                 return node.type
             if node.fn in core.BITWISE_OPS:
                 node.operand_type = node.type = self._bitwise_type(left, right, node)
@@ -311,11 +362,11 @@ class TypeInferencer:
             common = promote_numeric(left, right)
             if common is None: raise InferError(f'{node.fn} requires numeric operands, got {left} and {right}', node)
             node.operand_type = node.type = common; return common
-        if node.fn == 'neg#':
+        if node.fn in ('neg#', 'pos#', 'invert#'):
             ty = self.visit(node.args[0])
-            if is_boxed(ty):
+            if is_boxed(ty) or node.fn == 'invert#' or ty == bool_t:
                 node.operand_type = object_t
-                node.type = object_t
+                node.type = complex_t if ty == complex_t and node.fn != 'invert#' else object_t
                 return node.type
             if not is_numeric(ty): raise InferError('unary minus requires a numeric value', node)
             node.type = ty; return ty
@@ -326,9 +377,9 @@ class TypeInferencer:
             return node.type
         if node.fn in ('and#', 'or#'):
             left, right = self.visit(node.args[0]), self.visit(node.args[1])
-            if is_boxed(left) or is_boxed(right):
+            if is_boxed(left) or is_boxed(right) or _tuple_like(left) or _tuple_like(right):
                 self._boxed_types([left, right], node)
-                node.operand_type = node.type = self._join(left, right)
+                node.operand_type = node.type = self._join(left, right) or object_t
                 return node.type
             if is_string(left) and is_string(right):
                 node.operand_type = node.type = str_t; return str_t
@@ -344,7 +395,7 @@ class TypeInferencer:
         boxed_comparison = False
         for op, comparator in zip(node.ops, node.comparators):
             right = self.visit(comparator)
-            if is_boxed(left) or is_boxed(right):
+            if is_boxed(left) or is_boxed(right) or _tuple_like(left) or _tuple_like(right):
                 self._boxed_types([left, right], node)
                 boxed_comparison = True
                 left = right
@@ -423,7 +474,7 @@ class TypeInferencer:
         iterable = self.visit(node.iterable)
         if is_array(iterable): item_type = iterable.b
         elif is_string(iterable): item_type = str_t
-        elif is_boxed(iterable): item_type = object_t
+        elif is_boxed(iterable) or is_tuple(iterable): item_type = object_t
         else: raise InferError('for iteration requires an array, string, or iterable Python object', node.iterable)
         self._loop_body(node, item_type)
 
@@ -460,10 +511,14 @@ class TypeInferencer:
 
     def visit_Return(self, node):
         value_ty = void_t if node.value is None else self.visit(node.value)
+        if self.return_annotation == object_t:
+            value_ty = self._coerce(value_ty, object_t, node)
         if self.return_type is None:
             self.return_type = value_ty
         elif self.return_type != value_ty:
-            if value_ty == void_t and is_boxed(self.return_type) or self.return_type == void_t and is_boxed(value_ty):
+            if value_ty == void_t and self.return_type == none_t or self.return_type == void_t and value_ty == none_t:
+                common = none_t
+            elif value_ty == void_t and is_boxable(self.return_type) or self.return_type == void_t and is_boxable(value_ty):
                 common = object_t
             else:
                 common = self._join(self.return_type, value_ty)
@@ -479,35 +534,30 @@ class TypeInferencer:
             node.object_runtime = f'method:{name[4:]}'
             node.type = object_t
             return node.type
-        always_boxed = ('list', 'set', 'frozenset', 'tuple', 'range', 'slice',
-                        'enumerate', 'zip', 'reversed', 'iter', 'next', 'hash')
-        optionally_boxed = ('sum', 'any', 'all', 'len', 'min', 'max', 'abs', 'ord', 'chr',
-                            'int', 'float', 'str', 'bool')
-        if name in always_boxed or name in optionally_boxed and any(is_boxed(ty) for ty in arg_types):
+        always_boxed = {'list', 'set', 'frozenset', 'enumerate', 'zip', 'reversed', 'min', 'max',
+                        'iter', 'next', 'hash', 'int', 'float', 'str', 'bool'} | OBJECT_CONSTRUCTORS.keys() | OBJECT_BUILTINS.keys()
+        native_builtin = {
+            'len': lambda: len(arg_types) == 1 and (is_string(arg_types[0])
+                                                   or is_array(arg_types[0]) or is_tuple(arg_types[0])),
+            'abs': lambda: len(arg_types) == 1 and is_numeric(arg_types[0]),
+            'ord': lambda: arg_types == [str_t],
+            'chr': lambda: len(arg_types) == 1 and is_integer(arg_types[0]),
+            'sum': lambda: len(arg_types) == 1 and is_array(arg_types[0]),
+            'any': lambda: len(arg_types) == 1 and is_array(arg_types[0]),
+            'all': lambda: len(arg_types) == 1 and is_array(arg_types[0]),
+        }.get(name)
+        if name in always_boxed or native_builtin is not None and not native_builtin():
             self._boxed_types(arg_types, node)
             node.object_runtime = name
             node.type = _BOXED_BUILTINS.get(name, object_t)
             return node.type
         if node.fn.id == 'len':
-            if len(arg_types) != 1 or not (is_string(arg_types[0]) or is_array(arg_types[0]) or is_tuple(arg_types[0])):
-                raise InferError('len expects one string, tuple, or array argument', node)
             node.type = int64_t; return int64_t
         if node.fn.id == 'abs':
-            if len(arg_types) != 1 or not is_numeric(arg_types[0]):
-                raise InferError('abs expects one numeric argument', node)
             node.type = arg_types[0]; return node.type
-        if node.fn.id in ('min', 'max'):
-            if len(arg_types) != 2:
-                raise InferError(f'{node.fn.id} expects two arguments', node)
-            common = promote_numeric(arg_types[0], arg_types[1])
-            if common is None: raise InferError(f'{node.fn.id} expects numeric arguments', node)
-            node.operand_type = node.type = common; return common
         if node.fn.id == 'ord':
-            if arg_types != [str_t]: raise InferError('ord expects one string argument', node)
             node.type = int64_t; return int64_t
         if node.fn.id == 'chr':
-            if len(arg_types) != 1 or not is_integer(arg_types[0]):
-                raise InferError('chr expects one integer argument', node)
             node.type = str_t; return str_t
         if node.fn.id in MATH_INTRINSICS:
             if len(arg_types) != 1 or not is_numeric(arg_types[0]):
@@ -516,8 +566,6 @@ class TypeInferencer:
             node.type = bool_t if node.fn.id in ('math.isnan', 'math.isinf', 'math.isfinite') else double64_t
             return node.type
         if node.fn.id in ('sum', 'any', 'all'):
-            if len(arg_types) != 1 or not is_array(arg_types[0]):
-                raise InferError(f'{node.fn.id} expects one array argument', node)
             element = arg_types[0].b
             if node.fn.id in ('any', 'all'):
                 node.type = bool_t
@@ -549,6 +597,11 @@ class TypeInferencer:
             node.type = self.return_type; return node.type
         if self.jit_resolver is not None:
             signature, symbol = self.jit_resolver(node.fn.id, arg_types)
+            if callable(symbol):
+                self._boxed_types(arg_types, node)
+                node.jit_callable = symbol
+                node.type = object_t
+                return node.type
             if signature is not None:
                 node.jit_signature, node.jit_symbol = signature, symbol
                 node.type = signature.return_type; return node.type
@@ -569,16 +622,21 @@ class TypeInferencer:
         value_type = self.visit(node.value) if node.value is not None else None
         args = [self.visit(arg) for arg in node.args]
         keywords = [self.visit(arg) for arg in node.keyword_values]
-        if value_type == str_t and node.name == 'count':
-            if args != [str_t] or keywords:
-                raise InferError('count expects one string argument', node)
-            node.type = int64_t
-            return node.type
-        if value_type is not None and not is_boxed(value_type):
+        name = f'str.{node.name}'
+        node.native_string = False
+        if value_type == str_t and not keywords and name in STRING_INTRINSICS:
+            arity = 0 if name in STRING_TRANSFORMS | STRING_PREDICATES else 2 if node.name == 'replace' else 1
+            if args == [str_t] * arity and not any(isinstance(arg, core.Starred) for arg in node.args):
+                node.native_string = True
+                if name in STRING_TRANSFORMS or node.name == 'replace': node.type = str_t
+                elif name in STRING_PREDICATES or node.name in ('startswith', 'endswith'): node.type = bool_t
+                else: node.type = int64_t
+                return node.type
+        if value_type is not None and not is_boxable(value_type):
             raise InferError(f'{node.name} requires a Python object', node.value)
         self._boxed_types(args + keywords, node)
         if node.value is None:
-            node.type = _BOXED_BUILTINS[node.name]
+            node.type = _BOXED_BUILTINS.get(node.name, object_t)
         elif (node.name in LIST_RETURNING_METHODS and value_type == list_t
               or node.name in SET_RETURNING_METHODS and value_type in (set_t, frozenset_t)
               or node.name in ('copy', 'fromkeys') and value_type == dict_t):
@@ -589,9 +647,15 @@ class TypeInferencer:
             node.type = object_t
         return node.type
 
+    def visit_Invoke(self, node):
+        self._boxed_types([self.visit(node.value), *map(self.visit, node.args),
+                           *map(self.visit, node.keyword_values)], node)
+        node.type = object_t
+        return object_t
+
     def visit_Attribute(self, node):
         value_type = self.visit(node.value)
-        if not is_boxed(value_type):
+        if not is_boxable(value_type):
             raise InferError(f'{node.name} requires a Python object', node.value)
         node.type = object_t
         return node.type

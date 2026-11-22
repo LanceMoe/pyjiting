@@ -2,6 +2,7 @@
 
 import ast as py_ast
 import ctypes
+import sys
 from typing import Any
 
 from llvmlite import ir
@@ -13,9 +14,9 @@ from .intrinsics import (MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES,
 from .object_runtime import callback_address as object_callback_address
 from .ll_types import mangler, wrap_type
 from .registry import get as get_registered, keep_callback, record_callback
-from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
+from .types import (PYTHON_TYPES, TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
                     is_array, is_boxable, is_boxed, is_float, is_integer, is_string, is_tuple,
-                    dict_t, frozenset_t, list_t, object_t, set_t, shape_t, str_t, void_t)
+                    none_t, object_t, shape_t, str_t, tuple_t, void_t)
 from .string_runtime import (StringPointer, allocation_address, callback_address,
                              literal_address, make_string, set_pending_exception,
                              to_python)
@@ -62,14 +63,15 @@ TYPE_MAP = {
     int32_t: ir_i32, int64_t: ir_i64, bool_t: ir_i64, float32_t: ir_f32,
     double64_t: ir_f64, void_t: ir_void,
     str_t: string_type(),
-    list_t: object_pointer, set_t: object_pointer, frozenset_t: object_pointer,
-    dict_t: object_pointer, object_t: object_pointer,
 }
 
 
 def to_lltype(ty):
+    if is_boxed(ty): return object_pointer
     if is_array(ty): return array_type(to_lltype(ty.b))
-    if is_tuple(ty): return ir.PointerType(ir.LiteralStructType([to_lltype(element) for element in ty.elements]))
+    if is_tuple(ty):
+        fields = [to_lltype(element) for element in ty.elements]
+        return ir.PointerType(ir.LiteralStructType([*fields, object_pointer]))
     try: return TYPE_MAP[ty]
     except KeyError as error: raise CodegenError(f'no LLVM type for {ty}') from error
 
@@ -131,9 +133,13 @@ class LLVMCodeGen:
         if source == target: return value
         target_ll = to_lltype(target)
         if target == object_t: return self._box(value, source)
+        if target == tuple_t and is_tuple(source): return self._box(value, source)
+        if is_tuple(target) and source in (tuple_t, object_t):
+            return self._unbox_tuple(value, target)
         if source == object_t:
-            if target in (list_t, set_t, frozenset_t, dict_t):
-                return self._object_call(f'as_{str(target).lower()}', object_pointer, [value])
+            if is_boxed(target):
+                kind = self._literal_object(PYTHON_TYPES[target])
+                return self._object_call('require_type', object_pointer, [value, kind])
             if target == bool_t: return self.truthy(value, source, normalize=True)
             if target in (int32_t, int64_t):
                 integer = self._object_call('unbox_int', ir_i64, [value])
@@ -199,8 +205,8 @@ class LLVMCodeGen:
 
     def visit_Fun(self, node):
         self.org_func_name = node.fname
-        self.sort_namespace = getattr(node, 'namespace', {})
-        self.sort_bindings = node.bindings
+        self.python_scope = (getattr(node, 'namespace', {}), node.closure_cells)
+        self.runtime_state = getattr(node, 'runtime_state', None)
         self.start_function(mangler(node.symbol, self.args))
         for arg in node.args:
             if not is_array(arg.type):
@@ -227,7 +233,9 @@ class LLVMCodeGen:
         self.error_ptr = self.function.args[-1]
         self.error_ptr.name = 'error'
         if self.return_type != void_t:
-            self.builder.store(ir.Constant(to_lltype(self.return_type), None), self.return_slot)
+            initial = (self._literal_object(None) if self.return_type in (object_t, none_t)
+                       else ir.Constant(to_lltype(self.return_type), None))
+            self.builder.store(initial, self.return_slot)
         for core_arg, ll_arg, ty in zip(node.args, self.function.args, self.args):
             ll_arg.name = core_arg.id
             if is_array(ty):
@@ -275,6 +283,16 @@ class LLVMCodeGen:
 
     def visit_LitNone(self, node):
         return self._object_call('none', object_pointer, [])
+
+    def _literal_object(self, value):
+        roots = getattr(self.module, 'python_roots', None)
+        if roots is None:
+            roots = self.module.python_roots = []
+        roots.append(value)
+        return self.builder.inttoptr(ir.Constant(ir_i64, id(value)), object_pointer)
+
+    def visit_LitObject(self, node):
+        return self._literal_object(node.value)
 
     def visit_LitList(self, node):
         return self._pack_positional(node.elements)
@@ -326,26 +344,57 @@ class LLVMCodeGen:
                 self._object_call('set_add', ir_void, [result, self._boxed_value(item)])
         return result
     def visit_LitTuple(self, node):
+        if node.type == tuple_t:
+            items = self._pack_positional(node.elements)
+            return self._object_call('tuple', object_pointer, [items])
         pointer_type = to_lltype(node.type)
         pointer = self._allocate_structure(pointer_type)
+        owner = self._tuple_owner(pointer, node.type)
+        self.builder.store(ir.Constant(object_pointer, None), owner)
         for index, element in enumerate(node.elements):
             address = self.builder.gep(pointer, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, index)])
             self.builder.store(self.visit(element), address)
+        return pointer
+
+    def _tuple_owner(self, pointer, ty):
+        return self.builder.gep(pointer, [self.const(0, ir_i32), self.const(len(ty.elements), ir_i32)])
+
+    def _unbox_tuple(self, value, ty):
+        size = len(ty.elements)
+        self._object_call('check_tuple_size', ir_void, [value, self.const(size)])
+        pointer = self._allocate_structure(to_lltype(ty))
+        self.builder.store(value, self._tuple_owner(pointer, ty))
+        for index, element in enumerate(ty.elements):
+            item = self._object_call('tuple_item', object_pointer, [value, self.const(index)])
+            address = self.builder.gep(pointer, [self.const(0, ir_i32), self.const(index, ir_i32)])
+            self.builder.store(self.cast(item, object_t, element), address)
         return pointer
 
     def visit_Comprehension(self, node):
         self.visit(node.body)
         return self.visit(node.result)
 
-    def visit_SortKey(self, node):
-        spec = (node.source_text, tuple(node.names), self.sort_namespace, self.sort_bindings)
-        roots = getattr(self.module, 'python_roots', None)
-        if roots is None:
-            roots = self.module.python_roots = []
-        roots.append(spec)
-        handle = self.builder.inttoptr(ir.Constant(ir_i64, id(spec)), object_pointer)
-        values = [self._boxed_value(value) for value in node.values]
-        return self._object_call('sort_key', object_pointer, [handle, *values])
+    def visit_Global(self, node):
+        return self._object_call('load_global', object_pointer,
+                                 [self._literal_object(self.python_scope), self._boxed_string(node.name)])
+
+    def visit_JoinedStr(self, node):
+        if not node.parts:
+            return self._literal_string('')
+        if len(node.parts) == 1:
+            return self.visit(node.parts[0])
+        return self._object_call('join_strings', string_type(), [self.visit(part) for part in node.parts])
+
+    def visit_FormattedValue(self, node):
+        value = self._boxed_value(node.value)
+        conversion = node.conversion
+        # CPython 3.13 separated conversion from formatting. Its conversion runs
+        # before evaluating a nested format spec; 3.12 does it afterwards.
+        if conversion != -1 and sys.version_info >= (3, 13):
+            value = self._object_call('format_convert', object_pointer, [value, self.const(conversion)])
+            conversion = -1
+        spec = self._literal_string('') if node.format_spec is None else self.visit(node.format_spec)
+        return self._object_call('format_part', string_type(), [value, spec, self.const(conversion)])
 
     def _allocate_structure(self, pointer_type):
         null = ir.Constant(pointer_type, None)
@@ -417,7 +466,7 @@ class LLVMCodeGen:
         self.guard(writeable, ERROR_ARRAY_READONLY)
 
     def visit_Index(self, node):
-        if is_boxed(node.value.type):
+        if is_boxed(node.value.type) or getattr(node, 'boxed', False):
             value, key = self._object_subscript(node)
             return self._object_call('getitem', object_pointer, [value, key])
         if is_tuple(node.value.type):
@@ -639,7 +688,7 @@ class LLVMCodeGen:
         return self.cast(result, bool_t, node.type)
 
     def _common(self, left, right):
-        if is_boxed(left) or is_boxed(right): return object_t
+        if is_boxed(left) or is_boxed(right) or is_tuple(left) or is_tuple(right): return object_t
         if is_string(left) and is_string(right): return str_t
         from .types import promote_numeric
         result = promote_numeric(left, right)
@@ -647,7 +696,11 @@ class LLVMCodeGen:
         return result
 
     def visit_Prim(self, node):
-        if node.fn == 'shape#': return None
+        if node.fn == 'shape#':
+            if node.type == object_t:
+                return self._object_call('getattr', object_pointer,
+                                         [self._boxed_value(node.args[0]), self._boxed_string('shape')])
+            return None
         if node.fn in ('and#', 'or#'): return self._short_circuit(node)
         if node.fn == 'not#':
             truth = self.truthy(self.visit(node.args[0]), node.args[0].type)
@@ -658,6 +711,7 @@ class LLVMCodeGen:
             return self._object_call(name, object_pointer, [self._boxed_value(arg) for arg in node.args])
         if node.fn == 'neg#':
             value = self.visit(node.args[0]); return self.builder.fneg(value) if is_float(node.type) else self.builder.neg(value)
+        if node.fn == 'pos#': return self.visit(node.args[0])
         if node.fn == 'add#' and is_string(node.type):
             return self._checked_runtime_call(
                 'concat', string_type(), [string_type(), string_type()],
@@ -846,8 +900,8 @@ class LLVMCodeGen:
 
     def visit_ForEach(self, node):
         iterable = self.visit(node.iterable)
-        if is_boxed(node.iterable.type):
-            self._visit_boxed_loop(node, iterable)
+        if is_boxed(node.iterable.type) or is_tuple(node.iterable.type):
+            self._visit_boxed_loop(node, self._box(iterable, node.iterable.type))
             return
         init, test, body, latch, after = (self.new_block('foreach_init'), self.new_block('foreach_test'),
                                           self.new_block('foreach_body'), self.new_block('foreach_latch'),
@@ -930,9 +984,13 @@ class LLVMCodeGen:
             else:
                 result = self.cast(self.visit(node.value), node.value.type, self.return_type)
             self.builder.store(result, self.return_slot)
+        elif node.value is not None:
+            self.visit(node.value)
         self.builder.branch(self.exit_block)
 
     def visit_CallFunc(self, node):
+        if hasattr(node, 'jit_callable'):
+            return self._invoke(self._literal_object(node.jit_callable), node.args, (), (), node.type)
         if hasattr(node, 'object_runtime'):
             return self._object_call(node.object_runtime, to_lltype(node.type),
                                    [self._boxed_value(arg) for arg in node.args])
@@ -955,11 +1013,6 @@ class LLVMCodeGen:
                 return self.builder.call(fn, [value])
             negative = self.builder.icmp_signed('<', value, ir.Constant(value.type, 0))
             return self.builder.select(negative, self.builder.neg(value), value)
-        if node.fn.id in ('min', 'max'):
-            left = self.cast(args[0], node.args[0].type, node.type); right = self.cast(args[1], node.args[1].type, node.type)
-            if is_float(node.type): predicate = self.builder.fcmp_ordered('<=' if node.fn.id == 'min' else '>=', left, right)
-            else: predicate = self.builder.icmp_signed('<=' if node.fn.id == 'min' else '>=', left, right)
-            return self.builder.select(predicate, left, right)
         if node.fn.id == 'ord':
             result = self._runtime_call('ord', ir_i64, [string_type(), ir.PointerType(ir_i32)],
                                         [args[0], self.error_ptr])
@@ -1042,36 +1095,55 @@ class LLVMCodeGen:
         return result
 
     def visit_MethodCall(self, node):
-        if node.value is not None and node.value.type == str_t:
-            args = [self.visit(node.value), self.visit(node.args[0])]
-            return self._checked_runtime_call('count', ir_i64, [string_type(), string_type()], args)
-        if None in node.keywords:
-            return self._call_with_keyword_unpacking(node)
-        values = [] if node.value is None else [self._boxed_value(node.value)]
-        name = node.name if node.value is None else f'method:{node.name}'
-        if any(isinstance(arg, core.Starred) for arg in node.args):
-            name = f'packed:{name}'
-            values.append(self._pack_positional(node.args))
-        else:
-            values.extend(self._boxed_value(arg) for arg in node.args)
+        if node.native_string:
+            args = [self.visit(node.value), *[self.visit(arg) for arg in node.args]]
+            return self._checked_runtime_call(node.name, to_lltype(node.type), [string_type()] * len(args), args)
+        if node.value is not None or None in node.keywords or any(isinstance(arg, core.Starred) for arg in node.args):
+            return self._invoke(self._load_method(node), node.args, node.keywords, node.keyword_values, node.type)
+        values = [self._boxed_value(arg) for arg in node.args]
         values.extend(self._boxed_value(arg) for arg in node.keyword_values)
-        return self._object_call(name, to_lltype(node.type), values, tuple(node.keywords))
+        return self._object_call(node.name, to_lltype(node.type), values, tuple(node.keywords))
 
-    def _call_with_keyword_unpacking(self, node):
+    def _load_method(self, node):
         if node.value is None:
-            function = self._object_call(f'builtin:{node.name}', object_pointer, [])
+            return self._object_call(f'builtin:{node.name}', object_pointer, [])
+        return self._object_call('getattr', object_pointer,
+                                 [self._boxed_value(node.value), self._boxed_string(node.name)])
+
+    def visit_Invoke(self, node):
+        function = self._boxed_value(node.value)
+        if self.runtime_state is not None:
+            self._object_call('check_call_context', ir_void, [function, self._literal_object(self.runtime_state)])
+        return self._invoke(function, node.args, node.keywords, node.keyword_values, node.type)
+
+    def _invoke(self, function, args, names, values, return_type):
+        if None not in names and not any(isinstance(arg, core.Starred) for arg in args):
+            evaluated = [self._boxed_value(arg) for arg in (*args, *values)]
+            return self._object_call('invoke', to_lltype(return_type), [function, *evaluated], tuple(names))
+        if len(args) == 1 and isinstance(args[0], core.Starred):
+            positional = self._boxed_value(args[0].value)
         else:
-            function = self._object_call('getattr', object_pointer,
-                                         [self._boxed_value(node.value), self._boxed_string(node.name)])
-        positional = self._pack_positional(node.args)
+            positional = self._pack_positional(args)
         keywords = self._object_call('dict', object_pointer, [])
-        for name, value in zip(node.keywords, node.keyword_values):
+        explicit = None
+
+        def merge(mapping):
+            self._object_call('merge_keywords', ir_void, [function, keywords, mapping])
+
+        for name, value in zip(names, values):
             if name is None:
-                self._object_call('merge_keywords', ir_void, [function, keywords, self._boxed_value(value)])
+                if explicit is not None:
+                    merge(explicit)
+                    explicit = None
+                merge(self._boxed_value(value))
             else:
-                self._object_call('set_keyword', ir_void,
-                                  [function, keywords, self._boxed_string(name), self._boxed_value(value)])
-        return self._object_call('call', to_lltype(node.type), [function, positional, keywords])
+                if explicit is None:
+                    explicit = self._object_call('dict', object_pointer, [])
+                self._object_call('setitem', ir_void,
+                                  [explicit, self._boxed_string(name), self._boxed_value(value)])
+        if explicit is not None:
+            merge(explicit)
+        return self._object_call('call', to_lltype(return_type), [function, positional, keywords])
 
     def visit_Attribute(self, node):
         value = self._boxed_value(node.value)
@@ -1215,16 +1287,33 @@ class LLVMCodeGen:
 
     def _box(self, value, ty):
         if is_boxed(ty): return value
+        if ty == void_t: return self._object_call('none', object_pointer, [])
         if is_array(ty):
             owner = self.builder.gep(value, [self.const(0, ir_i32), self.const(6, ir_i32)])
             return self.builder.load(owner)
         if is_tuple(ty):
+            owner = self._tuple_owner(value, ty)
+            existing = self.builder.load(owner)
+            cached_block = self.builder.block
+            create = self.new_block('box_tuple')
+            done = self.new_block('tuple_object')
+            missing = self.builder.icmp_unsigned('==', existing, ir.Constant(object_pointer, None))
+            self.builder.cbranch(missing, create, done)
+            self.set_block(create)
             items = self._object_call('list', object_pointer, [])
             for index, element in enumerate(ty.elements):
                 address = self.builder.gep(value, [self.const(0, ir_i32), self.const(index, ir_i32)])
                 item = self._box(self.builder.load(address), element)
                 self._object_call('append', ir_void, [items, item])
-            return self._object_call('tuple', object_pointer, [items])
+            created = self._object_call('tuple', object_pointer, [items])
+            self.builder.store(created, owner)
+            created_block = self.builder.block
+            self.builder.branch(done)
+            self.set_block(done)
+            result = self.builder.phi(object_pointer)
+            result.add_incoming(existing, cached_block)
+            result.add_incoming(created, created_block)
+            return result
         if ty == bool_t: name = 'box_bool'
         elif is_integer(ty): name = 'box_int'
         elif is_float(ty): name = 'box_float'
