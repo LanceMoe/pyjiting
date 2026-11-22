@@ -10,12 +10,12 @@ from . import ast as core
 from .errors import CodegenError
 from .intrinsics import (MATH_INTRINSICS, STRING_INTRINSICS, STRING_PREDICATES,
                          STRING_TRANSFORMS)
-from .list_runtime import callback_address as list_callback_address
+from .object_runtime import callback_address as object_callback_address
 from .ll_types import mangler, wrap_type
 from .registry import get as get_registered, keep_callback, record_callback
 from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
                     is_array, is_boxable, is_boxed, is_float, is_integer, is_string, is_tuple,
-                    list_t, object_t, shape_t, str_t, void_t)
+                    frozenset_t, list_t, object_t, set_t, shape_t, str_t, void_t)
 from .string_runtime import (StringPointer, allocation_address, callback_address,
                              literal_address, make_string, set_pending_exception,
                              to_python)
@@ -62,7 +62,7 @@ TYPE_MAP = {
     int32_t: ir_i32, int64_t: ir_i64, bool_t: ir_i64, float32_t: ir_f32,
     double64_t: ir_f64, void_t: ir_void,
     str_t: string_type(),
-    list_t: object_pointer, object_t: object_pointer,
+    list_t: object_pointer, set_t: object_pointer, frozenset_t: object_pointer, object_t: object_pointer,
 }
 
 
@@ -131,15 +131,16 @@ class LLVMCodeGen:
         target_ll = to_lltype(target)
         if target == object_t: return self._box(value, source)
         if source == object_t:
-            if target == list_t: return self._list_call('as_list', object_pointer, [value])
+            if target in (list_t, set_t, frozenset_t):
+                return self._object_call(f'as_{str(target).lower()}', object_pointer, [value])
             if target == bool_t: return self.truthy(value, source, normalize=True)
             if target in (int32_t, int64_t):
-                integer = self._list_call('unbox_int', ir_i64, [value])
+                integer = self._object_call('unbox_int', ir_i64, [value])
                 return self.cast(integer, int64_t, target)
             if target in (float32_t, double64_t):
-                number = self._list_call('unbox_float', ir_f64, [value])
+                number = self._object_call('unbox_float', ir_f64, [value])
                 return self.cast(number, double64_t, target)
-            if target == str_t: return self._list_call('unbox_str', string_type(), [value])
+            if target == str_t: return self._object_call('unbox_str', string_type(), [value])
         if source == bool_t:
             source = int64_t
             if source == target: return value
@@ -159,7 +160,7 @@ class LLVMCodeGen:
             result = self.builder.icmp_signed('!=', length, ir.Constant(ir_i64, 0))
         elif is_tuple(ty): result = ir.Constant(ir_i1, int(bool(ty.elements)))
         elif is_boxed(ty):
-            truth = self._list_call('bool', ir_i64, [value])
+            truth = self._object_call('bool', ir_i64, [value])
             result = self.builder.icmp_signed('!=', truth, self.const(0))
         else: raise CodegenError(f'cannot use {ty} as a condition')
         return self.builder.zext(result, ir_i64) if normalize else result
@@ -266,15 +267,31 @@ class LLVMCodeGen:
         return self.builder.inttoptr(ir.Constant(ir_i64, literal_address(node.value)), string_type())
 
     def visit_LitNone(self, node):
-        return self._list_call('none', object_pointer, [])
+        return self._object_call('none', object_pointer, [])
 
     def visit_LitList(self, node):
-        result = self._list_call('list', object_pointer, [])
-        for item in node.elements:
+        return self._pack_positional(node.elements)
+
+    def _pack_positional(self, elements):
+        result = self._object_call('list', object_pointer, [])
+        for item in elements:
             if isinstance(item, core.Starred):
-                self._list_call('extend', ir_void, [result, self._boxed_value(item.value)])
+                self._object_call('extend', ir_void, [result, self._boxed_value(item.value)])
             else:
-                self._list_call('append', ir_void, [result, self._boxed_value(item)])
+                self._object_call('append', ir_void, [result, self._boxed_value(item)])
+        return result
+
+    def visit_LitSet(self, node):
+        # Evaluate the initial run of expressions before hashing any of them.
+        first_unpack = next((i for i, item in enumerate(node.elements) if isinstance(item, core.Starred)),
+                            len(node.elements))
+        args = [self._pack_positional(node.elements[:first_unpack])] if first_unpack else []
+        result = self._object_call('set', object_pointer, args)
+        for item in node.elements[first_unpack:]:
+            if isinstance(item, core.Starred):
+                self._object_call('set_update', ir_void, [result, self._boxed_value(item.value)])
+            else:
+                self._object_call('set_add', ir_void, [result, self._boxed_value(item)])
         return result
     def visit_LitTuple(self, node):
         pointer_type = to_lltype(node.type)
@@ -284,7 +301,7 @@ class LLVMCodeGen:
             self.builder.store(self.visit(element), address)
         return pointer
 
-    def visit_ListComp(self, node):
+    def visit_Comprehension(self, node):
         self.visit(node.body)
         return self.visit(node.result)
 
@@ -296,7 +313,7 @@ class LLVMCodeGen:
         roots.append(spec)
         handle = self.builder.inttoptr(ir.Constant(ir_i64, id(spec)), object_pointer)
         values = [self._boxed_value(value) for value in node.values]
-        return self._list_call('sort_key', object_pointer, [handle, *values])
+        return self._object_call('sort_key', object_pointer, [handle, *values])
 
     def _allocate_structure(self, pointer_type):
         null = ir.Constant(pointer_type, None)
@@ -369,8 +386,8 @@ class LLVMCodeGen:
 
     def visit_Index(self, node):
         if is_boxed(node.value.type):
-            value, key = self._list_subscript(node)
-            return self._list_call('getitem', object_pointer, [value, key])
+            value, key = self._object_subscript(node)
+            return self._object_call('getitem', object_pointer, [value, key])
         if is_tuple(node.value.type):
             value = self.visit(node.value)
             address = self.builder.gep(value, [ir.Constant(ir_i32, 0), ir.Constant(ir_i32, node.tuple_index)])
@@ -412,10 +429,10 @@ class LLVMCodeGen:
         value = self.visit(node.value)
         if getattr(node, 'boxed', False):
             star = self.const(node.star if node.star is not None else -1)
-            items = self._list_call('unpack', object_pointer,
+            items = self._object_call('unpack', object_pointer,
                                     [self._box(value, node.value.type), self.const(len(node.refs)), star])
             for index, name in enumerate(node.refs):
-                item = self._list_call('getitem', object_pointer,
+                item = self._object_call('getitem', object_pointer,
                                        [items, self._box(self.const(index), int64_t)])
                 target = node.ref_types[index]
                 self._store_local(name, self.cast(item, node.source_types[index], target), target)
@@ -428,8 +445,8 @@ class LLVMCodeGen:
     def visit_StoreIndex(self, node):
         if is_boxed(node.value.type):
             rhs = self._boxed_value(node.rhs)
-            value, key = self._list_subscript(node)
-            self._list_call('setitem', ir_void, [value, key, rhs])
+            value, key = self._object_subscript(node)
+            self._object_call('setitem', ir_void, [value, key, rhs])
             return
         address, element = self._index_address(node.value, node.indices)
         self._guard_array_writeable(node.value)
@@ -438,11 +455,11 @@ class LLVMCodeGen:
 
     def visit_AugStoreIndex(self, node):
         if is_boxed(node.value.type):
-            value, key = self._list_subscript(node)
-            left = self._list_call('getitem', object_pointer, [value, key])
+            value, key = self._object_subscript(node)
+            left = self._object_call('getitem', object_pointer, [value, key])
             right = self._boxed_value(node.rhs)
-            result = self._list_call(f'inplace:{node.fn}', object_pointer, [left, right])
-            self._list_call('setitem', ir_void, [value, key, result])
+            result = self._object_call(f'inplace:{node.fn}', object_pointer, [left, right])
+            self._object_call('setitem', ir_void, [value, key, result])
             return
         address, element = self._index_address(node.value, node.indices)
         self._guard_array_writeable(node.value)
@@ -462,27 +479,29 @@ class LLVMCodeGen:
             result = self._float_mod(left, right) if is_float(node.type) else self._integer_mod(left, right)
         elif node.fn == 'pow#':
             result = self._pow_values(node, left, right)
+        elif node.fn in core.BITWISE_OPS:
+            result = self._bitwise(node.fn, left, right)
         else:
             raise CodegenError(f'unsupported augmented assignment primitive {node.fn}', node)
         self.builder.store(self.cast(result, node.type, element), address, align=1)
 
-    def _list_subscript(self, node):
+    def _object_subscript(self, node):
         value = self._boxed_value(node.value)
         index = node.indices[0]
         if not isinstance(index, core.Slice):
             return value, self._boxed_value(index)
         bounds = [self._boxed_value(bound) if bound is not None
-                  else self._list_call('none', object_pointer, [])
+                  else self._object_call('none', object_pointer, [])
                   for bound in (index.lower, index.upper, index.step)]
-        return value, self._list_call('slice', object_pointer, bounds)
+        return value, self._object_call('slice', object_pointer, bounds)
 
     def visit_DeleteIndex(self, node):
-        value, key = self._list_subscript(node)
-        self._list_call('delitem', ir_void, [value, key])
+        value, key = self._object_subscript(node)
+        self._object_call('delitem', ir_void, [value, key])
 
     def _compare(self, op, left, right, ty):
         if ty == object_t:
-            result = self._list_call(op, ir_i64, [left, right])
+            result = self._object_call(op, ir_i64, [left, right])
             return self.builder.icmp_signed('!=', result, self.const(0))
         if is_string(ty):
             if op in core.MEMBERSHIP_OPS:
@@ -601,7 +620,7 @@ class LLVMCodeGen:
             return self.cast(result, bool_t, node.type)
         if node.operand_type == object_t:
             name = f'inplace:{node.fn}' if node.inplace else node.fn
-            return self._list_call(name, object_pointer, [self._boxed_value(arg) for arg in node.args])
+            return self._object_call(name, object_pointer, [self._boxed_value(arg) for arg in node.args])
         if node.fn == 'neg#':
             value = self.visit(node.args[0]); return self.builder.fneg(value) if is_float(node.type) else self.builder.neg(value)
         if node.fn == 'add#' and is_string(node.type):
@@ -631,7 +650,12 @@ class LLVMCodeGen:
             self.guard_nonzero(right, node.operand_type, ERROR_DIVISION_BY_ZERO)
             return self._float_mod(left, right) if is_float(node.type) else self._integer_mod(left, right)
         if node.fn == 'pow#': return self._pow(node, left, right)
+        if node.fn in core.BITWISE_OPS: return self._bitwise(node.fn, left, right)
         raise CodegenError(f'unknown primitive {node.fn}', node)
+
+    def _bitwise(self, op, left, right):
+        operation = {'bitor#': self.builder.or_, 'bitand#': self.builder.and_, 'bitxor#': self.builder.xor}
+        return operation[op](left, right)
 
     def _llvm_floor(self, ty):
         name = 'llvm.floor.f32' if ty == float32_t else 'llvm.floor.f64'
@@ -838,13 +862,13 @@ class LLVMCodeGen:
         self.set_block(after)
 
     def _visit_boxed_loop(self, node, iterable):
-        iterator = self._list_call('iter', object_pointer, [iterable])
+        iterator = self._object_call('iter', object_pointer, [iterable])
         test, body, after = (self.new_block('list_next'), self.new_block('list_body'),
                              self.new_block('list_after'))
         otherwise = self.new_block('list_else') if node.orelse else after
         self.builder.branch(test)
         self.set_block(test)
-        item = self._list_call('next', object_pointer, [iterator])
+        item = self._object_call('iter_next', object_pointer, [iterator])
         finished = self.builder.icmp_unsigned('==', item, ir.Constant(object_pointer, None))
         self.builder.cbranch(finished, otherwise, body)
         self.break_blocks.append(after)
@@ -867,15 +891,15 @@ class LLVMCodeGen:
     def visit_Return(self, node):
         if self.return_type != void_t:
             if node.value is None:
-                result = self._list_call('none', object_pointer, [])
+                result = self._object_call('none', object_pointer, [])
             else:
                 result = self.cast(self.visit(node.value), node.value.type, self.return_type)
             self.builder.store(result, self.return_slot)
         self.builder.branch(self.exit_block)
 
     def visit_CallFunc(self, node):
-        if hasattr(node, 'list_runtime'):
-            return self._list_call(node.list_runtime, to_lltype(node.type),
+        if hasattr(node, 'object_runtime'):
+            return self._object_call(node.object_runtime, to_lltype(node.type),
                                    [self._boxed_value(arg) for arg in node.args])
         args = [self.visit(arg) for arg in node.args]
         if node.fn.id == 'len':
@@ -987,10 +1011,14 @@ class LLVMCodeGen:
             args = [self.visit(node.value), self.visit(node.args[0])]
             return self._checked_runtime_call('count', ir_i64, [string_type(), string_type()], args)
         values = [] if node.value is None else [self._boxed_value(node.value)]
-        values.extend(self._boxed_value(arg) for arg in node.args)
-        values.extend(self._boxed_value(arg) for arg in node.keyword_values)
         name = node.name if node.value is None else f'method:{node.name}'
-        return self._list_call(name, to_lltype(node.type), values, tuple(node.keywords))
+        if any(isinstance(arg, core.Starred) for arg in node.args):
+            name = f'packed:{name}'
+            values.append(self._pack_positional(node.args))
+        else:
+            values.extend(self._boxed_value(arg) for arg in node.args)
+        values.extend(self._boxed_value(arg) for arg in node.keyword_values)
+        return self._object_call(name, to_lltype(node.type), values, tuple(node.keywords))
 
     def _math_intrinsic(self, name, value):
         infinity = ir.Constant(ir_f64, float('inf'))
@@ -1115,9 +1143,9 @@ class LLVMCodeGen:
         self.propagate_error()
         return result
 
-    def _list_call(self, name, return_type, args, keywords=()):
+    def _object_call(self, name, return_type, args, keywords=()):
         arg_types = [arg.type for arg in args]
-        address = list_callback_address(name, wrap_type(return_type), [wrap_type(ty) for ty in arg_types], keywords)
+        address = object_callback_address(name, wrap_type(return_type), [wrap_type(ty) for ty in arg_types], keywords)
         pointer_type = ir.PointerType(ir.FunctionType(
             return_type, arg_types + [ir.PointerType(ir_i32)]))
         pointer = self.builder.inttoptr(ir.Constant(ir_i64, address), pointer_type)
@@ -1134,18 +1162,18 @@ class LLVMCodeGen:
             owner = self.builder.gep(value, [self.const(0, ir_i32), self.const(6, ir_i32)])
             return self.builder.load(owner)
         if is_tuple(ty):
-            items = self._list_call('list', object_pointer, [])
+            items = self._object_call('list', object_pointer, [])
             for index, element in enumerate(ty.elements):
                 address = self.builder.gep(value, [self.const(0, ir_i32), self.const(index, ir_i32)])
                 item = self._box(self.builder.load(address), element)
-                self._list_call('append', ir_void, [items, item])
-            return self._list_call('tuple', object_pointer, [items])
+                self._object_call('append', ir_void, [items, item])
+            return self._object_call('tuple', object_pointer, [items])
         if ty == bool_t: name = 'box_bool'
         elif is_integer(ty): name = 'box_int'
         elif is_float(ty): name = 'box_float'
         elif is_string(ty): name = 'box_str'
         else: raise CodegenError(f'cannot box {ty}')
-        return self._list_call(name, object_pointer, [value])
+        return self._object_call(name, object_pointer, [value])
 
     def visit_Expr(self, node): return self.visit(node.value)
     def visit_Noop(self, node): return None

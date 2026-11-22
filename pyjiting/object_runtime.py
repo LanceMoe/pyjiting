@@ -40,9 +40,9 @@ def _as_int(value):
     return number
 
 
-def _as_list(value):
-    if not isinstance(value, list):
-        raise TypeError(f'expected list, got {type(value).__name__}')
+def _require_type(value, expected):
+    if not isinstance(value, expected):
+        raise TypeError(f'expected {expected.__name__}, got {type(value).__name__}')
     return value
 
 
@@ -91,6 +91,7 @@ _primitives = {
     'add#': operator.add, 'sub#': operator.sub, 'mult#': operator.mul,
     'div#': operator.truediv, 'floordiv#': operator.floordiv, 'mod#': operator.mod,
     'pow#': operator.pow, 'neg#': operator.neg,
+    'bitor#': operator.or_, 'bitand#': operator.and_, 'bitxor#': operator.xor,
     'eq#': operator.eq, 'ne#': operator.ne, 'lt#': operator.lt,
     'le#': operator.le, 'gt#': operator.gt, 'ge#': operator.ge,
     'in#': lambda item, value: operator.contains(value, item),
@@ -101,6 +102,7 @@ _inplace_primitives = {
     'add#': operator.iadd, 'sub#': operator.isub, 'mult#': operator.imul,
     'div#': operator.itruediv, 'floordiv#': operator.ifloordiv,
     'mod#': operator.imod, 'pow#': operator.ipow,
+    'bitor#': operator.ior, 'bitand#': operator.iand, 'bitxor#': operator.ixor,
 }
 _operations = {
     **_primitives,
@@ -109,12 +111,16 @@ _operations = {
     'getitem': operator.getitem, 'setitem': operator.setitem, 'delitem': operator.delitem,
     'slice': slice, 'list': list, 'tuple': tuple, 'len': len, 'bool': bool,
     'append': list.append, 'extend': list.extend, 'unpack': _unpack,
+    'set': set, 'frozenset': frozenset, 'set_add': set.add, 'set_update': set.update,
     'int': int, 'float': float, 'str': str,
     'sum': sum, 'min': min, 'max': max, 'any': any, 'all': all, 'abs': abs,
-    'chr': chr, 'ord': ord, 'iter': iter, 'next': _next, 'range': range,
+    'chr': chr, 'ord': ord, 'iter': iter, 'iter_next': _next, 'next': next, 'hash': hash, 'range': range,
     'enumerate': enumerate, 'zip': zip, 'reversed': reversed,
     'box_int': int, 'box_float': float, 'box_bool': bool, 'box_str': to_python,
-    'unbox_int': _as_int, 'unbox_float': float, 'unbox_str': _as_string, 'as_list': _as_list,
+    'unbox_int': _as_int, 'unbox_float': float, 'unbox_str': _as_string,
+    'as_list': lambda value: _require_type(value, list),
+    'as_set': lambda value: _require_type(value, set),
+    'as_frozenset': lambda value: _require_type(value, frozenset),
     'sort_key': _sort_key,
 }
 
@@ -123,16 +129,21 @@ def callback_address(name, output_type, arg_types, keywords=()):
     key = (name, output_type, tuple(arg_types), keywords)
     callback = _callbacks.get(key)
     if callback is None:
-        if name.startswith('method:') or name == 'sorted':
-            method = name.removeprefix('method:')
+        packed = name.startswith('packed:')
+        call_name = name.removeprefix('packed:')
+        if packed or call_name.startswith('method:') or call_name == 'sorted':
+            method = call_name.removeprefix('method:')
 
             def operation(*args):
                 positional_count = len(args) - len(keywords)
                 positional = args[:positional_count]
                 kwargs = dict(zip(keywords, args[positional_count:]))
-                if name == 'sorted':
-                    return sorted(*positional, **kwargs)
-                return getattr(positional[0], method)(*positional[1:], **kwargs)
+                if call_name.startswith('method:'):
+                    function = getattr(positional[0], method)
+                    positional = positional[1:]
+                else:
+                    function = sorted if call_name == 'sorted' else _operations[call_name]
+                return function(*(positional[0] if packed else positional), **kwargs)
         else:
             operation = _operations[name]
 
@@ -146,7 +157,7 @@ def callback_address(name, output_type, arg_types, keywords=()):
                 values = [from_pointer(value) if arg_type == ObjectPointer else value
                           for arg_type, value in zip(arg_types, args[:-1])]
                 result: Any = operation(*values)
-                if name == 'next':
+                if name == 'iter_next':
                     return result
                 if output_type == ObjectPointer:
                     return retain(result)

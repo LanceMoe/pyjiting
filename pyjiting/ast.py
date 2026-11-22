@@ -154,7 +154,11 @@ class LitList(Node):
         self.elements = elements
 
 
-class ListComp(Node):
+class LitSet(LitList):
+    pass
+
+
+class Comprehension(Node):
     _fields = ('body', 'result')
     def __init__(self, body, result, source=None):
         super().__init__(source)
@@ -220,7 +224,9 @@ PRIM_OPS = {
     ast.Eq: 'eq#', ast.NotEq: 'ne#', ast.Lt: 'lt#', ast.LtE: 'le#', ast.Gt: 'gt#', ast.GtE: 'ge#',
     ast.In: 'in#', ast.NotIn: 'notin#',
     ast.Is: 'is#', ast.IsNot: 'isnot#',
+    ast.BitOr: 'bitor#', ast.BitAnd: 'bitand#', ast.BitXor: 'bitxor#',
 }
 ARITHMETIC_OPS = {'add#', 'sub#', 'mult#', 'div#', 'floordiv#', 'mod#', 'pow#'}
+BITWISE_OPS = {'bitor#', 'bitand#', 'bitxor#'}
 COMPARISON_OPS = {'eq#', 'ne#', 'lt#', 'le#', 'gt#', 'ge#'}
 MEMBERSHIP_OPS = {'in#', 'notin#'}

@@ -1,5 +1,6 @@
 FUNCTION_INTRINSICS = frozenset({
-    'len', 'abs', 'min', 'max', 'ord', 'chr', 'sum', 'any', 'all', 'list',
+    'len', 'abs', 'min', 'max', 'ord', 'chr', 'sum', 'any', 'all', 'list', 'set', 'frozenset',
+    'tuple', 'iter', 'next', 'hash',
     'sorted', 'range', 'slice', 'enumerate', 'zip', 'reversed', 'int', 'float', 'str', 'bool',
 })
 MATH_FUNCTIONS = frozenset({
@@ -19,6 +20,11 @@ LIST_METHODS = frozenset({
 })
 LIST_RETURNING_METHODS = frozenset({'copy'})
 LIST_INTEGER_METHODS = frozenset({'count', 'index'})
+SET_RETURNING_METHODS = frozenset({'copy', 'union', 'intersection', 'difference', 'symmetric_difference'})
+SET_METHODS = SET_RETURNING_METHODS | frozenset({
+    'isdisjoint', 'issubset', 'issuperset', 'add', 'clear', 'discard', 'pop', 'remove',
+    'update', 'intersection_update', 'difference_update', 'symmetric_difference_update',
+})
 STRING_TRANSFORMS = frozenset(f'str.{name}' for name in ('upper', 'lower', 'strip', 'lstrip', 'rstrip'))
 STRING_PREDICATES = frozenset(f'str.{name}' for name in ('isalpha', 'isalnum', 'isdigit', 'isspace'))
 

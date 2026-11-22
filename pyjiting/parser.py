@@ -8,9 +8,17 @@ from textwrap import dedent
 
 from . import ast as core
 from .errors import CompileError
-from .intrinsics import LIST_METHODS, MATH_CONSTANTS, MATH_FUNCTIONS, STRING_METHODS
-from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
-                    list_t, object_t, str_t, void_t)
+from .intrinsics import LIST_METHODS, MATH_CONSTANTS, MATH_FUNCTIONS, SET_METHODS, STRING_METHODS
+from .types import (TupleType, bool_t, double64_t, float32_t, frozenset_t, int32_t, int64_t,
+                    list_t, object_t, set_t, str_t, void_t)
+
+
+_CONTAINER_TYPES = {list: list_t, set: set_t, frozenset: frozenset_t}
+_CONTAINER_HINTS = {name: core_type for name, core_type in (
+    ('list', list_t), ('List', list_t), ('set', set_t), ('Set', set_t),
+    ('frozenset', frozenset_t), ('FrozenSet', frozenset_t),
+)}
+_BOXED_METHODS = LIST_METHODS | SET_METHODS
 
 
 def get_type_hint(annotation):
@@ -33,8 +41,9 @@ def get_type_hint(annotation):
     if annotation is type(None):
         return void_t
     origin = typing.get_origin(annotation)
-    if annotation is list or origin is list:
-        return list_t
+    for python_type, container_type in _CONTAINER_TYPES.items():
+        if annotation is python_type or origin is python_type:
+            return container_type
     if annotation is Callable or origin is Callable:
         return object_t
     if origin is tuple:
@@ -49,20 +58,19 @@ def get_type_hint(annotation):
     if isinstance(annotation, ast.Name):
         return {'int': int64_t, 'int64': int64_t, 'int32': int32_t,
                 'float': double64_t, 'float64': double64_t, 'float32': float32_t,
-                'bool': bool_t, 'str': str_t, 'None': void_t, 'list': list_t,
+                'bool': bool_t, 'str': str_t, 'None': void_t, **_CONTAINER_HINTS,
                 'Callable': object_t}.get(annotation.id)
     if isinstance(annotation, ast.Constant) and annotation.value is None:
         return void_t
     if isinstance(annotation, ast.Attribute):
+        if isinstance(annotation.value, ast.Name) and annotation.value.id == 'typing':
+            return _CONTAINER_HINTS.get(annotation.attr)
         return {'int32': int32_t, 'int64': int64_t, 'float32': float32_t,
                 'float64': double64_t, 'bool_': bool_t}.get(annotation.attr)
-    if isinstance(annotation, ast.Subscript) and (
-        isinstance(annotation.value, ast.Name) and annotation.value.id in ('list', 'List')
-        or isinstance(annotation.value, ast.Attribute)
-        and isinstance(annotation.value.value, ast.Name)
-        and annotation.value.value.id == 'typing' and annotation.value.attr == 'List'
-    ):
-        return list_t
+    if isinstance(annotation, ast.Subscript):
+        container = get_type_hint(annotation.value)
+        if container in _CONTAINER_TYPES.values():
+            return container
     if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name) and annotation.value.id in ('tuple', 'Tuple'):
         elements = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
         if any(isinstance(element, ast.Constant) and element.value is Ellipsis for element in elements): return None
@@ -190,10 +198,12 @@ class ASTVisitor(ast.NodeVisitor):
 
     def visit_Tuple(self, node): return core.LitTuple([self.visit(element) for element in node.elts], node)
 
-    def visit_List(self, node):
-        elements = [core.Starred(self.visit(element.value), element) if isinstance(element, ast.Starred)
-                    else self.visit(element) for element in node.elts]
-        return core.LitList(elements, node)
+    def _items(self, elements):
+        return [core.Starred(self.visit(element.value), element) if isinstance(element, ast.Starred)
+                else self.visit(element) for element in elements]
+
+    def visit_List(self, node): return core.LitList(self._items(node.elts), node)
+    def visit_Set(self, node): return core.LitSet(self._items(node.elts), node)
 
     def visit_Return(self, node):
         if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
@@ -326,17 +336,23 @@ class ASTVisitor(ast.NodeVisitor):
         return f'${role}.{self._temporary_count}'
 
     def visit_ListComp(self, node):
+        return self._comprehension(node, core.LitList([], node), 'append')
+
+    def visit_SetComp(self, node):
+        return self._comprehension(node, core.LitSet([], node), 'add')
+
+    def _comprehension(self, node, initial, method):
         outer = self._comp_locals.copy()
-        result_name = self._temporary('listcomp')
+        result_name = self._temporary('comprehension')
         result = core.Var(result_name, source=node)
 
         def clause(index):
             if index == len(node.generators):
-                append = core.MethodCall(result, 'append', [self.visit(node.elt)], [], [], node)
-                return core.Expr(append, node)
+                call = core.MethodCall(result, method, [self.visit(node.elt)], [], [], node)
+                return core.Expr(call, node)
             generator = node.generators[index]
             if generator.is_async:
-                raise CompileError('async list comprehensions are not supported', node)
+                raise CompileError('async comprehensions are not supported', node)
             item_name = self._temporary('item')
 
             def body():
@@ -355,8 +371,8 @@ class ASTVisitor(ast.NodeVisitor):
             return self._for_loop(core.Var(item_name, source=node), generator.iter, body, [], node)
 
         try:
-            assign = core.Assign(result_name, core.LitList([], node), source=node)
-            return core.ListComp([assign, clause(0)], result, node)
+            assign = core.Assign(result_name, initial, source=node)
+            return core.Comprehension([assign, clause(0)], result, node)
         finally:
             self._comp_locals = outer
 
@@ -396,18 +412,20 @@ class ASTVisitor(ast.NodeVisitor):
                     raise CompileError(f'unsupported math function {node.func.attr!r}', node.func)
                 return core.CallFunc(core.Var(f'math.{node.func.attr}', source=node.func),
                                      [self.visit(arg) for arg in node.args], node)
-            if node.func.attr not in STRING_METHODS | LIST_METHODS:
+            if node.func.attr not in STRING_METHODS | _BOXED_METHODS:
                 raise CompileError(f'unsupported method {node.func.attr!r}', node.func)
-            if node.func.attr in LIST_METHODS:
+            if node.func.attr in _BOXED_METHODS:
                 names, values = self._sort_keywords(node)
                 return core.MethodCall(self.visit(node.func.value), node.func.attr,
-                                       [self.visit(arg) for arg in node.args], names, values, node)
+                                       self._items(node.args), names, values, node)
             return core.CallFunc(core.Var(f'str.{node.func.attr}', source=node.func),
                                  [self.visit(node.func.value), *[self.visit(arg) for arg in node.args]], node)
         if not isinstance(node.func, ast.Name): raise CompileError('only calls to named functions are supported', node)
         if node.func.id == 'sorted':
             names, values = self._sort_keywords(node)
             return core.MethodCall(None, 'sorted', [self.visit(arg) for arg in node.args], names, values, node)
+        if node.func.id in ('set', 'frozenset') and any(isinstance(arg, ast.Starred) for arg in node.args):
+            return core.MethodCall(None, node.func.id, self._items(node.args), [], [], node)
         return core.CallFunc(core.Var(node.func.id, source=node.func), [self.visit(arg) for arg in node.args], node)
 
     def _sort_keywords(self, node):

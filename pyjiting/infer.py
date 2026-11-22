@@ -1,11 +1,15 @@
 from . import ast as core
 from .errors import InferError
-from .intrinsics import (LIST_INTEGER_METHODS, LIST_RETURNING_METHODS, MATH_INTRINSICS,
+from .intrinsics import (LIST_INTEGER_METHODS, LIST_RETURNING_METHODS, MATH_INTRINSICS, SET_RETURNING_METHODS,
                          STRING_INTRINSICS, STRING_PREDICATES, STRING_TRANSFORMS)
 from .types import (FuncType, TupleType, bool_t, can_widen, contains_array,
                     double64_t, float32_t, int32_t, int64_t, is_array, is_integer,
                     is_boxable, is_boxed, is_numeric, is_string, is_truthy_type, is_tuple,
-                    list_t, object_t, promote_numeric, shape_t, str_t, void_t)
+                    frozenset_t, list_t, object_t, promote_numeric, set_t, shape_t, str_t, void_t)
+
+
+_BOXED_BUILTINS = {'list': list_t, 'set': set_t, 'frozenset': frozenset_t,
+                   'len': int64_t, 'ord': int64_t, 'sorted': list_t}
 
 
 class UnderDetermined(InferError):
@@ -31,7 +35,7 @@ class TypeInferencer:
         if actual == expected: return expected
         if can_widen(actual, expected): return expected
         if expected == object_t and is_boxable(actual): return expected
-        if actual == object_t and (is_numeric(expected) or expected in (list_t, str_t)):
+        if actual == object_t and (is_numeric(expected) or is_boxed(expected) or expected == str_t):
             return expected
         raise InferError(f'cannot use {actual} where {expected} is required', node)
 
@@ -112,18 +116,22 @@ class TypeInferencer:
         node.type = list_t
         return node.type
 
+    def visit_LitSet(self, node):
+        self._boxed_types([self.visit(item) for item in node.elements], node)
+        node.type = set_t
+        return node.type
+
     def visit_Starred(self, node):
         node.type = self.visit(node.value)
         return node.type
 
-    def visit_ListComp(self, node):
+    def visit_Comprehension(self, node):
         before = self.env.copy()
         for statement in node.body:
             self._visit_statement(statement)
-        self.visit(node.result)
+        node.type = self.visit(node.result)
         self.env = before
-        node.type = list_t
-        return list_t
+        return node.type
 
     def visit_SortKey(self, node):
         self._boxed_types([self.visit(item) for item in node.values], node)
@@ -153,7 +161,7 @@ class TypeInferencer:
             if node.star is not None:
                 source_types[node.star] = list_t
         elif not is_tuple(value_ty):
-            raise InferError('unpacking requires a tuple or list value', node.value)
+            raise InferError('unpacking requires a tuple or an iterable Python object', node.value)
         elif len(node.refs) != len(value_ty.elements):
             raise InferError(f'cannot unpack tuple of length {len(value_ty.elements)} into {len(node.refs)} names', node)
         else:
@@ -185,6 +193,10 @@ class TypeInferencer:
         if not is_array(array_ty): raise InferError('subscript assignment requires an array', node.value)
         for index in node.indices: self._coerce(self.visit(index), int64_t, index)
         rhs_ty = self.visit(node.rhs)
+        if node.fn in core.BITWISE_OPS:
+            node.operand_type = self._bitwise_type(array_ty.b, rhs_ty, node)
+            node.type = self._coerce(node.operand_type, array_ty.b, node)
+            return
         common = promote_numeric(array_ty.b, rhs_ty)
         if common is None: raise InferError(f'{node.fn} requires numeric operands', node)
         exponent = core.integer_constant_value(node.rhs) if node.fn == 'pow#' else None
@@ -197,7 +209,7 @@ class TypeInferencer:
 
     def _boxed_subscript(self, node):
         if len(node.indices) != 1:
-            raise InferError('list expects one index', node)
+            raise InferError('Python object expects one index', node)
         index = node.indices[0]
         if isinstance(index, core.Slice):
             for bound in (index.lower, index.upper, index.step):
@@ -208,7 +220,7 @@ class TypeInferencer:
 
     def visit_DeleteIndex(self, node):
         if not is_boxed(self.visit(node.value)):
-            raise InferError('subscript deletion requires a list', node.value)
+            raise InferError('subscript deletion requires a Python object', node.value)
         self._boxed_subscript(node)
         return void_t
 
@@ -242,11 +254,16 @@ class TypeInferencer:
         for index in node.indices: self._coerce(self.visit(index), int64_t, index)
         node.type = value_ty.b; return node.type
 
+    def _bitwise_type(self, left, right, node):
+        if not is_integer(left) or not is_integer(right):
+            raise InferError(f'{node.fn} requires integer operands', node)
+        return bool_t if left == right == bool_t else promote_numeric(left, right)
+
     def visit_Prim(self, node):
         if node.fn == 'shape#':
             if not is_array(self.visit(node.args[0])): raise InferError('shape requires an array', node)
             node.type = shape_t; return node.type
-        if node.fn in core.ARITHMETIC_OPS:
+        if node.fn in core.ARITHMETIC_OPS | core.BITWISE_OPS:
             left = self.visit(node.args[0]); right = self.visit(node.args[1])
             if is_boxed(left) or is_boxed(right):
                 self._boxed_types([left, right], node)
@@ -256,6 +273,12 @@ class TypeInferencer:
                     or node.fn == 'mult#' and (
                         left == list_t and is_integer(right) or right == list_t and is_integer(left))
                 ) else object_t
+                if (node.fn in core.BITWISE_OPS | {'sub#'} and left in (set_t, frozenset_t)
+                        and right in (set_t, frozenset_t)):
+                    node.type = left
+                return node.type
+            if node.fn in core.BITWISE_OPS:
+                node.operand_type = node.type = self._bitwise_type(left, right, node)
                 return node.type
             if node.fn == 'add#' and is_string(left) and is_string(right):
                 node.operand_type = node.type = str_t; return str_t
@@ -315,7 +338,7 @@ class TypeInferencer:
                 left = right
                 continue
             if op in ('is#', 'isnot#'):
-                raise InferError('identity comparison requires a list or boxed value', node)
+                raise InferError('identity comparison requires a boxed value', node)
             if op in core.MEMBERSHIP_OPS:
                 if not (is_string(left) and is_string(right)):
                     raise InferError(f'{op} requires string operands', node)
@@ -389,7 +412,7 @@ class TypeInferencer:
         if is_array(iterable): item_type = iterable.b
         elif is_string(iterable): item_type = str_t
         elif is_boxed(iterable): item_type = object_t
-        else: raise InferError('for iteration requires an array, list, or string', node.iterable)
+        else: raise InferError('for iteration requires an array, string, or iterable Python object', node.iterable)
         self._loop_body(node, item_type)
 
     def _loop_body(self, node, item_type=None, test=None):
@@ -439,13 +462,19 @@ class TypeInferencer:
     def visit_CallFunc(self, node):
         arg_types = [self.visit(arg) for arg in node.args]
         name = node.fn.id
-        always_boxed = ('list', 'range', 'slice', 'enumerate', 'zip', 'reversed')
+        if name in STRING_INTRINSICS and is_boxed(arg_types[0]):
+            self._boxed_types(arg_types, node)
+            node.object_runtime = f'method:{name[4:]}'
+            node.type = object_t
+            return node.type
+        always_boxed = ('list', 'set', 'frozenset', 'tuple', 'range', 'slice',
+                        'enumerate', 'zip', 'reversed', 'iter', 'next', 'hash')
         optionally_boxed = ('sum', 'any', 'all', 'len', 'min', 'max', 'abs', 'ord', 'chr',
                             'int', 'float', 'str', 'bool')
         if name in always_boxed or name in optionally_boxed and any(is_boxed(ty) for ty in arg_types):
             self._boxed_types(arg_types, node)
-            node.list_runtime = name
-            node.type = {'list': list_t, 'len': int64_t, 'ord': int64_t}.get(name, object_t)
+            node.object_runtime = name
+            node.type = _BOXED_BUILTINS.get(name, object_t)
             return node.type
         if node.fn.id == 'len':
             if len(arg_types) != 1 or not (is_string(arg_types[0]) or is_array(arg_types[0]) or is_tuple(arg_types[0])):
@@ -534,10 +563,13 @@ class TypeInferencer:
             node.type = int64_t
             return node.type
         if value_type is not None and not is_boxed(value_type):
-            raise InferError(f'{node.name} requires a list', node.value)
+            raise InferError(f'{node.name} requires a Python object', node.value)
         self._boxed_types(args + keywords, node)
-        if node.name == 'sorted' or node.name in LIST_RETURNING_METHODS and value_type == list_t:
-            node.type = list_t
+        if node.value is None:
+            node.type = _BOXED_BUILTINS[node.name]
+        elif (node.name in LIST_RETURNING_METHODS and value_type == list_t
+              or node.name in SET_RETURNING_METHODS and value_type in (set_t, frozenset_t)):
+            node.type = value_type
         elif node.name in LIST_INTEGER_METHODS and value_type == list_t:
             node.type = int64_t
         else:

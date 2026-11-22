@@ -56,19 +56,22 @@ Pyjiting compiles a function to native code when it is first called. A function 
 | Strings | Unicode values, comparison/membership, full slicing, concat/repeat, transforms, predicates, search, and `ord`/`chr` | `tests/test_string.py`, `tests/test_string_phase2.py` |
 | Tuples | Fixed heterogeneous literals/arguments/returns, nesting, annotations, constant indexing, `len`, truthiness and exact name unpacking | `tests/test_tuple_phase4.py` |
 | Lists | Mixed and nested elements, literals, comprehensions, `list()`, indexing and slice mutation, iteration, standard methods and argument/return identity | `tests/test_list.py` |
+| Sets | `set` and `frozenset`, displays and comprehensions, iteration, algebra, comparisons, and standard methods | `tests/test_set.py` |
 | Arrays | Four numeric ndarray dtypes; checked indexing, strided multidimensional access, one-dimensional iteration, and multidimensional scalar `sum`/`any`/`all` reductions | `tests/test_array.py`, `tests/test_extensions.py`, `tests/test_numeric_phase3.py` |
 | Intrinsics | Typed scalar/string builtins plus native `math` trigonometry, roots, exponentials, logarithms, classification and constants | `tests/test_extensions.py`, `tests/test_string_phase2.py`, `tests/test_numeric_phase3.py` |
 | Constants | Immutable scalar/string globals and closure values captured when `@jit` is applied | `tests/test_numeric_phase3.py` |
 | Annotations and callbacks | Scalar/string annotations, deferred `np.ndarray` dtype specialization, and persistent annotated `@reg` callbacks | `tests/test_parser.py`, `tests/test_reg_callback.py`, `tests/test_extensions.py` |
 | Validation | Parser source locations, inference rules and LLVM verification for generated modules | `tests/test_parser.py`, `tests/test_codegen.py` |
 
-### Python types and lists
+### Python types and collections
 
 Lists can contain mixed types and nested lists, including `None`. They support negative indices, slices, item and slice assignment/deletion, starred and nested unpacking, iteration, membership, comparison, concatenation, repetition, and all standard list methods, including `sort(key=..., reverse=...)`. Arguments and return values preserve the identity of Python lists. Mutations are visible through aliases, and slicing and `copy()` make shallow copies. `list[T]` annotations identify a list and do not enforce `T` at runtime. LLVM compiles the surrounding function and calls the Python runtime for list operations.
 
-`dict`, `set`, `frozenset`, `complex`, `bytes`, `bytearray`, `memoryview`, and arbitrary Python objects are unsupported as standalone JIT parameters or native types. `None` can be returned or held by the Python runtime, but it is not accepted as a standalone argument. Union annotations such as `int | None` are unsupported. `range(...)` works in loops and in expressions such as `list(range(n))`; `range` and `slice` objects cannot be passed as arguments. Tuples cannot be sliced, concatenated, compared, iterated over, or indexed dynamically. String methods such as `split()` and `encode()` are unsupported on native strings.
+Sets support displays with `*iterable`, comprehensions, `set(iterable)`, and the standard methods. Union, intersection, difference, symmetric difference, membership and subset/superset comparisons follow Python semantics, including when mixed with `frozenset`. Passing or returning a set preserves its identity, so aliases see changes made by mutating methods or augmented assignment. `set[T]` and `frozenset[T]` identify the outer type at runtime. LLVM compiles the surrounding function and calls Python for collection operations.
 
-Native Python `int` arguments must fit a signed 64-bit integer, and native arithmetic wraps on overflow. A native `bool` returned to Python currently arrives as `0` or `1`, including in a native tuple. Booleans stored in a Python list retain their type. NumPy array parameters support `int32`, `int64`, `float32`, and `float64` only. Returning an ndarray directly is unsupported. An unsupported argument type raises `TypeError` before compilation, including with `fallback=True`.
+`dict`, `complex`, `bytes`, `bytearray`, `memoryview`, and arbitrary Python objects are unsupported as standalone JIT parameters or native types. `None` can be returned or held by the Python runtime, but it is not accepted as a standalone argument. Union annotations such as `int | None` are unsupported. `range(...)` works in loops and in expressions such as `list(range(n))`; `range` and `slice` objects cannot be passed as arguments. Tuples cannot be sliced, concatenated, compared, iterated over, or indexed dynamically. String methods such as `split()` and `encode()` are unsupported on native strings.
+
+Native Python `int` arguments must fit a signed 64-bit integer, and native arithmetic wraps on overflow. A native `bool` returned to Python currently arrives as `0` or `1`, including in a native tuple. Booleans stored in a Python list or set retain their type. NumPy array parameters support `int32`, `int64`, `float32`, and `float64` only. Returning an ndarray directly is unsupported. An unsupported argument type raises `TypeError` before compilation, including with `fallback=True`.
 
 ### Numeric and array semantics
 
@@ -87,7 +90,7 @@ Tuples are immutable fixed-length structural types. A tuple's element types part
 
 Each specialization is keyed by its decorated compilation-unit identity and argument types, and uses a private LLVM symbol. Functions with the same short name, source location, or signature therefore cannot share a cached native implementation by accident. `runtime_stats()` exposes cache/callback/literal counters; `clear_cache(function=None)` removes dispatcher cache entries but does not claim to release MCJIT code memory.
 
-Regular `@jit` wrappers accept positional/keyword calls and supported default arguments through the original Python signature. List defaults retain their identity across calls. Use `compiled.specialize(*args)` to compile without executing the function, `runtime_stats(compiled)` / `inspect_specializations(compiled)` for per-function metrics, and `get_llvm_ir(compiled, *args)` for development diagnostics. Statistics include compile waits, per-signature compile counts, lightweight failure details, string runtime calls, and registered callback calls. `JITContext` provides an isolated engine, module/specialization budgets, explicit close semantics, and cleanup of callbacks registered through that context.
+Regular `@jit` wrappers accept positional/keyword calls and supported default arguments through the original Python signature. List and set defaults retain their identity across calls. Use `compiled.specialize(*args)` to compile without executing the function, `runtime_stats(compiled)` / `inspect_specializations(compiled)` for per-function metrics, and `get_llvm_ir(compiled, *args)` for development diagnostics. Statistics include compile waits, per-signature compile counts, lightweight failure details, string runtime calls, and registered callback calls. `JITContext` provides an isolated engine, module/specialization budgets, explicit close semantics, and cleanup of callbacks registered through that context.
 
 With `fallback=True`, unsupported frontend, inference, or code-generation paths execute the original Python function. The emitted `FallbackWarning` exposes `function`, `reason`, and `error_type`; `fallback_warning` accepts `"once"` (default), `"always"`, or `"ignore"`. Specialization limits, context resource limits, closed runtimes, and internal LLVM failures never fall back. String indexing and comparisons are native UTF-32 operations; complex Unicode transforms such as `upper()` and `lower()` still call the Python string runtime, and their crossings remain visible through `runtime_stats()['string_callbacks']`.
 
@@ -207,6 +210,7 @@ uv run examples/example_array_2d.py
 uv run examples/example_annotations.py
 uv run examples/example_mixed_types.py
 uv run examples/example_lists.py
+uv run examples/example_sets.py
 ```
 
 ## Performance
@@ -279,7 +283,7 @@ pyjiting/
 This is a research/educational project, not a production JIT. Among others:
 
 - No garbage collection integration; only a small statically-typed subset of Python is supported.
-- `for` supports `range`, lists, strings, and one-dimensional arrays. A constant zero range step is rejected during compilation.
+- `for` supports `range`, lists, sets, strings, and one-dimensional arrays. A constant zero range step is rejected during compilation.
 - Runtime division by zero raises `ZeroDivisionError`; a dynamic zero range step raises `ValueError` through the JIT error-status ABI.
 - A non-void JIT function must return on every control-flow path.
 - Integer power requires a compile-time constant exponent because a dynamic negative exponent has no single static return type.

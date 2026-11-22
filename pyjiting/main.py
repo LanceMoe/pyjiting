@@ -28,7 +28,7 @@ from .registry import (callback_count, callback_stats as registered_callback_sta
                        registration_id, signatures)
 from .string_runtime import callback_stats, literal_count
 from .types import (TupleType, bool_t, contains_array, double64_t, float32_t,
-                    int32_t, int64_t, list_t, make_array_type, object_t, str_t)
+                    frozenset_t, int32_t, int64_t, list_t, make_array_type, object_t, set_t, str_t)
 
 
 DEFAULT_MAX_SPECIALIZATIONS = 64
@@ -108,6 +108,10 @@ def reg(fn: Callable[P, R]) -> Callable[P, R]:
 def arg_pytype(arg):
     if isinstance(arg, list):
         return list_t
+    if isinstance(arg, set):
+        return set_t
+    if isinstance(arg, frozenset):
+        return frozenset_t
     if isinstance(arg, tuple):
         elements = [arg_pytype(element) for element in arg]
         if any(contains_array(element) for element in elements):

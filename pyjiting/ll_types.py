@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 from llvmlite import ir
 
-from .list_runtime import ObjectPointer, from_pointer, retain
+from .object_runtime import ObjectPointer, from_pointer, retain
 from .string_runtime import (StringDescriptor, StringPointer, begin_call, end_call,
                              keep_alive, make_string, take_pending_exception,
                              to_python)
