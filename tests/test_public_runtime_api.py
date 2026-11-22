@@ -37,7 +37,7 @@ def test_python_signature_reports_invalid_calls():
 
 
 def test_unsupported_default_is_rejected():
-    def invalid(value={}):
+    def invalid(value=b'unsupported'):
         return 0
 
     with pytest.raises(CompileError, match='unsupported default value.*value'):

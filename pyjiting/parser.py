@@ -8,17 +8,18 @@ from textwrap import dedent
 
 from . import ast as core
 from .errors import CompileError
-from .intrinsics import LIST_METHODS, MATH_CONSTANTS, MATH_FUNCTIONS, SET_METHODS, STRING_METHODS
-from .types import (TupleType, bool_t, double64_t, float32_t, frozenset_t, int32_t, int64_t,
+from .intrinsics import DICT_METHODS, LIST_METHODS, MATH_CONSTANTS, MATH_FUNCTIONS, SET_METHODS, STRING_METHODS
+from .types import (TupleType, bool_t, dict_t, double64_t, float32_t, frozenset_t, int32_t, int64_t,
                     list_t, object_t, set_t, str_t, void_t)
 
 
-_CONTAINER_TYPES = {list: list_t, set: set_t, frozenset: frozenset_t}
+_CONTAINER_TYPES = {list: list_t, set: set_t, frozenset: frozenset_t, dict: dict_t}
 _CONTAINER_HINTS = {name: core_type for name, core_type in (
     ('list', list_t), ('List', list_t), ('set', set_t), ('Set', set_t),
     ('frozenset', frozenset_t), ('FrozenSet', frozenset_t),
+    ('dict', dict_t), ('Dict', dict_t),
 )}
-_BOXED_METHODS = LIST_METHODS | SET_METHODS
+_BOXED_METHODS = LIST_METHODS | SET_METHODS | DICT_METHODS
 
 
 def get_type_hint(annotation):
@@ -205,6 +206,12 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_List(self, node): return core.LitList(self._items(node.elts), node)
     def visit_Set(self, node): return core.LitSet(self._items(node.elts), node)
 
+    def visit_Dict(self, node):
+        entries = [core.Starred(self.visit(value), value) if key is None
+                   else core.LitTuple([self.visit(key), self.visit(value)], key)
+                   for key, value in zip(node.keys, node.values)]
+        return core.LitDict(entries, node)
+
     def visit_Return(self, node):
         if node.value is None or (isinstance(node.value, ast.Constant) and node.value.value is None):
             return core.Return(None, node)
@@ -231,7 +238,7 @@ class ASTVisitor(ast.NodeVisitor):
                               for ref, element in zip(refs, elements)]]
         if isinstance(target, ast.Subscript):
             base, indices = self._subscript_parts(target)
-            return core.StoreIndex(base, indices, value, node)
+            return core.StoreIndex(base, indices, value, target)
         raise CompileError('unsupported assignment target', target)
 
     def visit_Assign(self, node):
@@ -256,7 +263,7 @@ class ASTVisitor(ast.NodeVisitor):
             return core.Assign(node.target.id, value, source=node)
         if isinstance(node.target, ast.Subscript):
             value, indices = self._subscript_parts(node.target)
-            return core.AugStoreIndex(value, indices, opname, self.visit(node.value), node)
+            return core.AugStoreIndex(value, indices, opname, self.visit(node.value), node.target)
         raise CompileError('unsupported augmented assignment target', node.target)
 
     def visit_Delete(self, node):
@@ -336,19 +343,22 @@ class ASTVisitor(ast.NodeVisitor):
         return f'${role}.{self._temporary_count}'
 
     def visit_ListComp(self, node):
-        return self._comprehension(node, core.LitList([], node), 'append')
+        return self._comprehension(node, core.LitList([], node), 'append', [node.elt])
 
     def visit_SetComp(self, node):
-        return self._comprehension(node, core.LitSet([], node), 'add')
+        return self._comprehension(node, core.LitSet([], node), 'add', [node.elt])
 
-    def _comprehension(self, node, initial, method):
+    def visit_DictComp(self, node):
+        return self._comprehension(node, core.LitDict([], node), '__setitem__', [node.key, node.value])
+
+    def _comprehension(self, node, initial, method, elements):
         outer = self._comp_locals.copy()
         result_name = self._temporary('comprehension')
         result = core.Var(result_name, source=node)
 
         def clause(index):
             if index == len(node.generators):
-                call = core.MethodCall(result, method, [self.visit(node.elt)], [], [], node)
+                call = core.MethodCall(result, method, [self.visit(item) for item in elements], [], [], node)
                 return core.Expr(call, node)
             generator = node.generators[index]
             if generator.is_async:
@@ -398,8 +408,8 @@ class ASTVisitor(ast.NodeVisitor):
     def visit_Expr(self, node): return core.Expr(self.visit(node.value), node)
 
     def visit_Call(self, node):
-        if node.keywords and not (isinstance(node.func, ast.Attribute) and node.func.attr == 'sort'
-                                  or isinstance(node.func, ast.Name) and node.func.id == 'sorted'):
+        if node.keywords and not (isinstance(node.func, ast.Attribute) and node.func.attr in ('sort', 'update')
+                                  or isinstance(node.func, ast.Name) and node.func.id in ('sorted', 'dict')):
             raise CompileError('keyword arguments are not supported', node)
         if isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name):
@@ -414,8 +424,12 @@ class ASTVisitor(ast.NodeVisitor):
                                      [self.visit(arg) for arg in node.args], node)
             if node.func.attr not in STRING_METHODS | _BOXED_METHODS:
                 raise CompileError(f'unsupported method {node.func.attr!r}', node.func)
+            if (node.func.attr == 'fromkeys' and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == 'dict' and 'dict' not in self._local_names
+                    and self._bindings.get('dict', dict) is dict):
+                return core.MethodCall(None, 'dict.fromkeys', self._items(node.args), [], [], node)
             if node.func.attr in _BOXED_METHODS:
-                names, values = self._sort_keywords(node)
+                names, values = self._keywords(node) if node.func.attr == 'update' else self._sort_keywords(node)
                 return core.MethodCall(self.visit(node.func.value), node.func.attr,
                                        self._items(node.args), names, values, node)
             return core.CallFunc(core.Var(f'str.{node.func.attr}', source=node.func),
@@ -424,9 +438,15 @@ class ASTVisitor(ast.NodeVisitor):
         if node.func.id == 'sorted':
             names, values = self._sort_keywords(node)
             return core.MethodCall(None, 'sorted', [self.visit(arg) for arg in node.args], names, values, node)
+        if node.func.id == 'dict':
+            names, values = self._keywords(node)
+            return core.MethodCall(None, 'dict', self._items(node.args), names, values, node)
         if node.func.id in ('set', 'frozenset') and any(isinstance(arg, ast.Starred) for arg in node.args):
             return core.MethodCall(None, node.func.id, self._items(node.args), [], [], node)
         return core.CallFunc(core.Var(node.func.id, source=node.func), [self.visit(arg) for arg in node.args], node)
+
+    def _keywords(self, node):
+        return [option.arg for option in node.keywords], [self.visit(option.value) for option in node.keywords]
 
     def _sort_keywords(self, node):
         names, values = [], []
@@ -466,11 +486,12 @@ class ASTVisitor(ast.NodeVisitor):
             if module_value is math and module_name not in self._local_names and node.attr in MATH_CONSTANTS:
                 return core.LitFloat(getattr(math, node.attr), node, double64_t)
         if node.attr == 'shape': return core.Prim('shape#', [self.visit(node.value)], node)
+        if node.attr == 'mapping': return core.Attribute(self.visit(node.value), node.attr, node)
         raise CompileError('unsupported attribute access', node)
 
     def _subscript_parts(self, node):
         elements = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-        return self.visit(node.value), [self.visit(element) for element in elements]
+        return self.visit(node.value), self._items(elements)
 
     def visit_Slice(self, node):
         return core.Slice(self.visit(node.lower) if node.lower else None,

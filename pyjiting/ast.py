@@ -40,24 +40,33 @@ class UnpackAssign(Node):
         self.source_types, self.ref_types = [], []
 
 
-class StoreIndex(Node):
-    _fields = ('value', 'indices', 'rhs')
+class Subscript(Node):
+    _fields = ('value', 'indices', 'tuple_key')
+
+    def __init__(self, value, indices, source=None):
+        super().__init__(source)
+        self.value = value
+        self.indices = indices if isinstance(indices, list) else [indices]
+        self.tuple_key = isinstance(getattr(source, 'slice', None), ast.Tuple)
+
+
+class StoreIndex(Subscript):
+    _fields = (*Subscript._fields, 'rhs')
     def __init__(self, value, indices, rhs, source=None):
-        super().__init__(source); self.value = value; self.indices = indices; self.rhs = rhs
+        super().__init__(value, indices, source)
+        self.rhs = rhs
 
 
-class AugStoreIndex(Node):
-    _fields = ('value', 'indices', 'fn', 'rhs')
+class AugStoreIndex(Subscript):
+    _fields = (*Subscript._fields, 'fn', 'rhs')
     def __init__(self, value, indices, fn, rhs, source=None):
-        super().__init__(source); self.value, self.indices, self.fn, self.rhs = value, indices, fn, rhs
+        super().__init__(value, indices, source)
+        self.fn, self.rhs = fn, rhs
         self.operand_type = None
 
 
-class DeleteIndex(Node):
-    _fields = ('value', 'indices')
-    def __init__(self, value, indices, source=None):
-        super().__init__(source)
-        self.value, self.indices = value, indices
+class DeleteIndex(Subscript):
+    pass
 
 
 class Return(Node):
@@ -106,6 +115,13 @@ class MethodCall(Node):
         super().__init__(source)
         self.value, self.name, self.args = value, name, args
         self.keywords, self.keyword_values = keywords, keyword_values
+
+
+class Attribute(Node):
+    _fields = ('value', 'name')
+    def __init__(self, value, name, source=None):
+        super().__init__(source)
+        self.value, self.name = value, name
 
 
 class Fun(Node):
@@ -158,6 +174,11 @@ class LitSet(LitList):
     pass
 
 
+class LitDict(LitList):
+    # Elements are key/value pairs or starred mappings.
+    pass
+
+
 class Comprehension(Node):
     _fields = ('body', 'result')
     def __init__(self, body, result, source=None):
@@ -189,9 +210,8 @@ class Prim(Node):
     inplace = False
 
 
-class Index(Node):
-    _fields = ('value', 'indices')
-    def __init__(self, value, indices, source=None): super().__init__(source); self.value = value; self.indices = indices if isinstance(indices, list) else [indices]
+class Index(Subscript):
+    pass
 
 
 class Slice(Node):

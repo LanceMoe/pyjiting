@@ -15,7 +15,7 @@ from .ll_types import mangler, wrap_type
 from .registry import get as get_registered, keep_callback, record_callback
 from .types import (TupleType, bool_t, double64_t, float32_t, int32_t, int64_t,
                     is_array, is_boxable, is_boxed, is_float, is_integer, is_string, is_tuple,
-                    frozenset_t, list_t, object_t, set_t, shape_t, str_t, void_t)
+                    dict_t, frozenset_t, list_t, object_t, set_t, shape_t, str_t, void_t)
 from .string_runtime import (StringPointer, allocation_address, callback_address,
                              literal_address, make_string, set_pending_exception,
                              to_python)
@@ -62,7 +62,8 @@ TYPE_MAP = {
     int32_t: ir_i32, int64_t: ir_i64, bool_t: ir_i64, float32_t: ir_f32,
     double64_t: ir_f64, void_t: ir_void,
     str_t: string_type(),
-    list_t: object_pointer, set_t: object_pointer, frozenset_t: object_pointer, object_t: object_pointer,
+    list_t: object_pointer, set_t: object_pointer, frozenset_t: object_pointer,
+    dict_t: object_pointer, object_t: object_pointer,
 }
 
 
@@ -131,7 +132,7 @@ class LLVMCodeGen:
         target_ll = to_lltype(target)
         if target == object_t: return self._box(value, source)
         if source == object_t:
-            if target in (list_t, set_t, frozenset_t):
+            if target in (list_t, set_t, frozenset_t, dict_t):
                 return self._object_call(f'as_{str(target).lower()}', object_pointer, [value])
             if target == bool_t: return self.truthy(value, source, normalize=True)
             if target in (int32_t, int64_t):
@@ -264,7 +265,13 @@ class LLVMCodeGen:
     def visit_LitFloat(self, node): return ir.Constant(to_lltype(node.type), node.n)
     def visit_LitBool(self, node): return ir.Constant(ir_i64, int(node.n))
     def visit_LitStr(self, node):
-        return self.builder.inttoptr(ir.Constant(ir_i64, literal_address(node.value)), string_type())
+        return self._literal_string(node.value)
+
+    def _literal_string(self, value):
+        return self.builder.inttoptr(ir.Constant(ir_i64, literal_address(value)), string_type())
+
+    def _boxed_string(self, value):
+        return self._box(self._literal_string(value), str_t)
 
     def visit_LitNone(self, node):
         return self._object_call('none', object_pointer, [])
@@ -280,6 +287,31 @@ class LLVMCodeGen:
             else:
                 self._object_call('append', ir_void, [result, self._boxed_value(item)])
         return result
+
+    def visit_LitDict(self, node):
+        result = None
+        entries = iter(node.elements)
+        entry = next(entries, None)
+        while entry is not None:
+            if isinstance(entry, core.Starred):
+                if result is None:
+                    result = self._object_call('dict', object_pointer, [])
+                self._object_call('dict_unpack', ir_void, [result, self._boxed_value(entry.value)])
+                entry = next(entries, None)
+                continue
+            # As with a Python display, evaluate the whole run before hashing its keys.
+            pairs = self._object_call('list', object_pointer, [])
+            while entry is not None and not isinstance(entry, core.Starred):
+                key, value = (self._boxed_value(item) for item in entry.elements)
+                pair = self._object_call('pair', object_pointer, [key, value])
+                self._object_call('append', ir_void, [pairs, pair])
+                entry = next(entries, None)
+            group = self._object_call('dict', object_pointer, [pairs])
+            if result is None:
+                result = group
+            else:
+                self._object_call('dict_unpack', ir_void, [result, group])
+        return result if result is not None else self._object_call('dict', object_pointer, [])
 
     def visit_LitSet(self, node):
         # Evaluate the initial run of expressions before hashing any of them.
@@ -487,13 +519,16 @@ class LLVMCodeGen:
 
     def _object_subscript(self, node):
         value = self._boxed_value(node.value)
-        index = node.indices[0]
-        if not isinstance(index, core.Slice):
-            return value, self._boxed_value(index)
+        if node.tuple_key:
+            items = self._pack_positional(node.indices)
+            return value, self._object_call('tuple', object_pointer, [items])
+        return value, self._boxed_value(node.indices[0])
+
+    def visit_Slice(self, node):
         bounds = [self._boxed_value(bound) if bound is not None
                   else self._object_call('none', object_pointer, [])
-                  for bound in (index.lower, index.upper, index.step)]
-        return value, self._object_call('slice', object_pointer, bounds)
+                  for bound in (node.lower, node.upper, node.step)]
+        return self._object_call('slice', object_pointer, bounds)
 
     def visit_DeleteIndex(self, node):
         value, key = self._object_subscript(node)
@@ -1010,6 +1045,8 @@ class LLVMCodeGen:
         if node.value is not None and node.value.type == str_t:
             args = [self.visit(node.value), self.visit(node.args[0])]
             return self._checked_runtime_call('count', ir_i64, [string_type(), string_type()], args)
+        if None in node.keywords:
+            return self._call_with_keyword_unpacking(node)
         values = [] if node.value is None else [self._boxed_value(node.value)]
         name = node.name if node.value is None else f'method:{node.name}'
         if any(isinstance(arg, core.Starred) for arg in node.args):
@@ -1019,6 +1056,26 @@ class LLVMCodeGen:
             values.extend(self._boxed_value(arg) for arg in node.args)
         values.extend(self._boxed_value(arg) for arg in node.keyword_values)
         return self._object_call(name, to_lltype(node.type), values, tuple(node.keywords))
+
+    def _call_with_keyword_unpacking(self, node):
+        if node.value is None:
+            function = self._object_call(f'builtin:{node.name}', object_pointer, [])
+        else:
+            function = self._object_call('getattr', object_pointer,
+                                         [self._boxed_value(node.value), self._boxed_string(node.name)])
+        positional = self._pack_positional(node.args)
+        keywords = self._object_call('dict', object_pointer, [])
+        for name, value in zip(node.keywords, node.keyword_values):
+            if name is None:
+                self._object_call('merge_keywords', ir_void, [function, keywords, self._boxed_value(value)])
+            else:
+                self._object_call('set_keyword', ir_void,
+                                  [function, keywords, self._boxed_string(name), self._boxed_value(value)])
+        return self._object_call('call', to_lltype(node.type), [function, positional, keywords])
+
+    def visit_Attribute(self, node):
+        value = self._boxed_value(node.value)
+        return self._object_call('getattr', object_pointer, [value, self._boxed_string(node.name)])
 
     def _math_intrinsic(self, name, value):
         infinity = ir.Constant(ir_f64, float('inf'))

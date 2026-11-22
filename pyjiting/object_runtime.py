@@ -87,6 +87,37 @@ def _unpack(value, size, star):
     raise ValueError(f'too many values to unpack (expected {size})')
 
 
+def _dict_unpack(target, mapping):
+    if type(mapping) is dict:
+        target.update(mapping)
+    else:
+        target.update({**mapping})
+
+
+def _merge_keywords(function, target, mapping):
+    try:
+        keys = mapping.keys
+    except AttributeError:
+        name = getattr(function, '__qualname__', type(function).__name__)
+        raise TypeError(
+            f'{name}() argument after ** must be a mapping, not {type(mapping).__name__}'
+        ) from None
+    for key in list(keys()):
+        _check_keyword(function, target, key)
+        target[key] = mapping[key]
+
+
+def _check_keyword(function, target, key):
+    if key in target:
+        name = getattr(function, '__qualname__', type(function).__name__)
+        raise TypeError(f'{name}() got multiple values for keyword argument {key!r}')
+
+
+def _set_keyword(function, target, key, value):
+    _check_keyword(function, target, key)
+    target[key] = value
+
+
 _primitives = {
     'add#': operator.add, 'sub#': operator.sub, 'mult#': operator.mul,
     'div#': operator.truediv, 'floordiv#': operator.floordiv, 'mod#': operator.mod,
@@ -112,6 +143,10 @@ _operations = {
     'slice': slice, 'list': list, 'tuple': tuple, 'len': len, 'bool': bool,
     'append': list.append, 'extend': list.extend, 'unpack': _unpack,
     'set': set, 'frozenset': frozenset, 'set_add': set.add, 'set_update': set.update,
+    'dict': dict, 'dict.fromkeys': dict.fromkeys, 'dict_unpack': _dict_unpack,
+    'pair': lambda key, value: (key, value),
+    'getattr': getattr, 'merge_keywords': _merge_keywords, 'set_keyword': _set_keyword,
+    'call': lambda function, args, kwargs: function(*args, **kwargs),
     'int': int, 'float': float, 'str': str,
     'sum': sum, 'min': min, 'max': max, 'any': any, 'all': all, 'abs': abs,
     'chr': chr, 'ord': ord, 'iter': iter, 'iter_next': _next, 'next': next, 'hash': hash, 'range': range,
@@ -121,6 +156,7 @@ _operations = {
     'as_list': lambda value: _require_type(value, list),
     'as_set': lambda value: _require_type(value, set),
     'as_frozenset': lambda value: _require_type(value, frozenset),
+    'as_dict': lambda value: _require_type(value, dict),
     'sort_key': _sort_key,
 }
 
@@ -131,7 +167,14 @@ def callback_address(name, output_type, arg_types, keywords=()):
     if callback is None:
         packed = name.startswith('packed:')
         call_name = name.removeprefix('packed:')
-        if packed or call_name.startswith('method:') or call_name == 'sorted':
+        if name.startswith('builtin:'):
+            function = _operations[name.removeprefix('builtin:')]
+
+            def builtin_operation(*args):
+                return function
+
+            operation = builtin_operation
+        elif packed or call_name.startswith('method:') or call_name == 'sorted' or keywords:
             method = call_name.removeprefix('method:')
 
             def operation(*args):

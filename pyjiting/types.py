@@ -93,6 +93,7 @@ str_t = BaseType('String')
 list_t = BaseType('List')
 set_t = BaseType('Set')
 frozenset_t = BaseType('FrozenSet')
+dict_t = BaseType('Dict')
 object_t = BaseType('Object')
 
 ptr_t = PointerType
@@ -157,7 +158,7 @@ def is_string(ty):
 
 
 def is_boxed(ty):
-    return ty in (list_t, set_t, frozenset_t, object_t)
+    return ty in (list_t, set_t, frozenset_t, dict_t, object_t)
 
 
 def is_boxable(ty):

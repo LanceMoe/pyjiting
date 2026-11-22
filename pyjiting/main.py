@@ -1,6 +1,7 @@
 # pyright: reportArgumentType=false
 
 import ast as py_ast
+from collections.abc import Mapping, MappingView
 import copy
 import functools
 import hashlib
@@ -27,7 +28,7 @@ from .registry import (callback_count, callback_stats as registered_callback_sta
                        get as get_registered, register, unregister,
                        registration_id, signatures)
 from .string_runtime import callback_stats, literal_count
-from .types import (TupleType, bool_t, contains_array, double64_t, float32_t,
+from .types import (TupleType, bool_t, contains_array, dict_t, double64_t, float32_t,
                     frozenset_t, int32_t, int64_t, list_t, make_array_type, object_t, set_t, str_t)
 
 
@@ -106,6 +107,8 @@ def reg(fn: Callable[P, R]) -> Callable[P, R]:
 
 
 def arg_pytype(arg):
+    if isinstance(arg, dict):
+        return dict_t
     if isinstance(arg, list):
         return list_t
     if isinstance(arg, set):
@@ -130,7 +133,7 @@ def arg_pytype(arg):
     if isinstance(arg, np.floating) or isinstance(arg, float): return double64_t
     if isinstance(arg, int) and -sys.maxsize - 1 <= arg <= sys.maxsize: return int64_t
     if isinstance(arg, str): return str_t
-    if callable(arg): return object_t
+    if callable(arg) or isinstance(arg, (Mapping, MappingView)): return object_t
     raise TypeError(f'Unsupported type: {type(arg).__name__}')
 
 
