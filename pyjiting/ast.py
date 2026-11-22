@@ -33,9 +33,10 @@ class Assign(Node):
 
 
 class UnpackAssign(Node):
-    _fields = ('refs', 'value')
-    def __init__(self, refs, value, source=None):
-        super().__init__(source); self.refs, self.value = refs, value
+    _fields = ('refs', 'value', 'star')
+    def __init__(self, refs, value, source=None, *, star=None):
+        super().__init__(source)
+        self.refs, self.value, self.star = refs, value, star
         self.source_types, self.ref_types = [], []
 
 
@@ -50,6 +51,13 @@ class AugStoreIndex(Node):
     def __init__(self, value, indices, fn, rhs, source=None):
         super().__init__(source); self.value, self.indices, self.fn, self.rhs = value, indices, fn, rhs
         self.operand_type = None
+
+
+class DeleteIndex(Node):
+    _fields = ('value', 'indices')
+    def __init__(self, value, indices, source=None):
+        super().__init__(source)
+        self.value, self.indices = value, indices
 
 
 class Return(Node):
@@ -78,6 +86,10 @@ class While(If):
     pass
 
 
+class IfExp(If):
+    pass
+
+
 class Compare(Node):
     _fields = ('left', 'ops', 'comparators')
     def __init__(self, left, ops, comparators, source=None): super().__init__(source); self.left, self.ops, self.comparators = left, ops, comparators
@@ -86,6 +98,14 @@ class Compare(Node):
 class CallFunc(Node):
     _fields = ('fn', 'args')
     def __init__(self, fn, args, source=None): super().__init__(source); self.fn, self.args = fn, args
+
+
+class MethodCall(Node):
+    _fields = ('value', 'name', 'args', 'keywords', 'keyword_values')
+    def __init__(self, value, name, args, keywords, keyword_values, source=None):
+        super().__init__(source)
+        self.value, self.name, self.args = value, name, args
+        self.keywords, self.keyword_values = keywords, keyword_values
 
 
 class Fun(Node):
@@ -127,9 +147,42 @@ class LitTuple(Node):
     def __init__(self, elements, source=None): super().__init__(source); self.elements = elements
 
 
+class LitList(Node):
+    _fields = ('elements',)
+    def __init__(self, elements, source=None):
+        super().__init__(source)
+        self.elements = elements
+
+
+class ListComp(Node):
+    _fields = ('body', 'result')
+    def __init__(self, body, result, source=None):
+        super().__init__(source)
+        self.body, self.result = body, result
+
+
+class SortKey(Node):
+    _fields = ('source_text', 'names', 'values')
+    def __init__(self, source_text, names, values, source=None):
+        super().__init__(source)
+        self.source_text, self.names, self.values = source_text, names, values
+
+
+class LitNone(Node):
+    pass
+
+
+class Starred(Node):
+    _fields = ('value',)
+    def __init__(self, value, source=None):
+        super().__init__(source)
+        self.value = value
+
+
 class Prim(Node):
-    _fields = ('fn', 'args')
+    _fields = ('fn', 'args', 'inplace')
     def __init__(self, fn, args, source=None): super().__init__(source); self.fn, self.args, self.operand_type = fn, args, None
+    inplace = False
 
 
 class Index(Node):
@@ -166,6 +219,7 @@ PRIM_OPS = {
     ast.Add: 'add#', ast.Sub: 'sub#', ast.Mult: 'mult#', ast.Div: 'div#', ast.FloorDiv: 'floordiv#', ast.Mod: 'mod#', ast.Pow: 'pow#',
     ast.Eq: 'eq#', ast.NotEq: 'ne#', ast.Lt: 'lt#', ast.LtE: 'le#', ast.Gt: 'gt#', ast.GtE: 'ge#',
     ast.In: 'in#', ast.NotIn: 'notin#',
+    ast.Is: 'is#', ast.IsNot: 'isnot#',
 }
 ARITHMETIC_OPS = {'add#', 'sub#', 'mult#', 'div#', 'floordiv#', 'mod#', 'pow#'}
 COMPARISON_OPS = {'eq#', 'ne#', 'lt#', 'le#', 'gt#', 'ge#'}

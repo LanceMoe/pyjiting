@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 from llvmlite import ir
 
+from .list_runtime import ObjectPointer, from_pointer, retain
 from .string_runtime import (StringDescriptor, StringPointer, begin_call, end_call,
                              keep_alive, make_string, take_pending_exception,
                              to_python)
@@ -60,6 +61,7 @@ def wrap_type(llvm_type) -> Any:
             _tuple_ctypes[key] = type(name, (ctypes.Structure,), {'_fields_': fields, '_pyjiting_tuple': True})
         return _tuple_ctypes[key]
     if isinstance(llvm_type, ir.IdentifiedStructType):
+        if llvm_type.name == 'pyjiting.object': return ObjectPointer._type_
         if llvm_type.name == 'pyjiting.string': return StringDescriptor
         cached = getattr(llvm_type, '_pyjiting_ctype', None)
         if cached is not None: return cached
@@ -70,6 +72,7 @@ def wrap_type(llvm_type) -> Any:
             ('strides', ctypes.POINTER(ctypes.c_int64)),
             ('itemsize', ctypes.c_int64),
             ('flags', ctypes.c_int64),
+            ('owner', ObjectPointer),
         ]
         ctype = type(llvm_type.name.replace('.', '_'), (ctypes.Structure,), {
             '_fields_': fields,
@@ -95,9 +98,12 @@ def wrap_ndarray(value):
 
 
 def wrap_arg(arg, value):
+    if arg == ObjectPointer:
+        return ctypes.cast(retain(value), ObjectPointer)
     if isinstance(value, np.ndarray):
         data, ndim, shape, strides, itemsize, flags = wrap_ndarray(value)
-        return arg._type_(data, ndim, shape, strides, itemsize, flags)
+        owner = ctypes.cast(retain(value), ObjectPointer)
+        return arg._type_(data, ndim, shape, strides, itemsize, flags, owner)
     if isinstance(value, str): return make_string(value)
     if isinstance(value, tuple): return wrap_tuple(arg, value)
     return value
@@ -110,6 +116,8 @@ def wrap_tuple(pointer_type, value):
     for item, (_, field_type) in zip(value, structure_type._fields_):
         if item is not None and field_type == StringPointer:
             converted.append(make_string(item))
+        elif field_type == ObjectPointer:
+            converted.append(ctypes.cast(retain(item), ObjectPointer))
         elif isinstance(item, tuple) and issubclass(field_type, ctypes._Pointer):
             converted.append(wrap_tuple(field_type, item))
         else:
@@ -125,6 +133,7 @@ def unwrap_tuple(pointer):
     for name, field_type in pointer._type_._fields_:
         value = getattr(pointer.contents, name)
         if field_type == StringPointer: result.append(to_python(value))
+        elif field_type == ObjectPointer: result.append(from_pointer(value))
         elif issubclass(field_type, ctypes._Pointer) and getattr(field_type._type_, '_pyjiting_tuple', False):
             result.append(unwrap_tuple(value))
         else: result.append(value)
@@ -162,6 +171,7 @@ def dispatcher(fn, user_arg_count):
                     raise RuntimeError('registered callback failed without a Python exception')
                 raise pending
             if fn._restype_ == StringPointer: return to_python(result)
+            if fn._restype_ == ObjectPointer: return from_pointer(result)
             if (isinstance(fn._restype_, type) and issubclass(fn._restype_, ctypes._Pointer) and
                     getattr(fn._restype_._type_, '_pyjiting_tuple', False)):
                 return unwrap_tuple(result)

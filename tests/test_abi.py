@@ -13,7 +13,7 @@ def test_ndarray_descriptor_uses_fixed_windows_safe_fields():
     descriptor = wrap_type(array_type(ir_i64).pointee)
 
     assert [name for name, _ in descriptor._fields_] == [
-        'data', 'ndim', 'shape', 'strides', 'itemsize', 'flags',
+        'data', 'ndim', 'shape', 'strides', 'itemsize', 'flags', 'owner',
     ]
     assert descriptor.ndim.offset == ctypes.sizeof(ctypes.c_void_p)
     assert descriptor.shape.offset > descriptor.ndim.offset

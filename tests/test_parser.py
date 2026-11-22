@@ -33,9 +33,9 @@ def test_parser_lowers_multiple_assignment_through_one_hidden_temporary():
     assignments, result = tree.body
     temporary, left, right = assignments
     assert isinstance(temporary, core.Assign)
-    assert temporary.ref == '__assign_tmp'
-    assert isinstance(left.value, core.Var) and left.value.id == '__assign_tmp'
-    assert isinstance(right.value, core.Var) and right.value.id == '__assign_tmp'
+    assert not temporary.ref.isidentifier()
+    assert isinstance(left.value, core.Var) and left.value.id == temporary.ref
+    assert isinstance(right.value, core.Var) and right.value.id == temporary.ref
     assert isinstance(result, core.Return)
 
 

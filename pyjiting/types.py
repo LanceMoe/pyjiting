@@ -90,6 +90,8 @@ void_t = BaseType('Void')
 array_t = BaseType('Array')
 shape_t = BaseType('Shape')
 str_t = BaseType('String')
+list_t = BaseType('List')
+object_t = BaseType('Object')
 
 ptr_t = PointerType
 
@@ -152,8 +154,17 @@ def is_string(ty):
     return ty == str_t
 
 
+def is_boxed(ty):
+    return ty in (list_t, object_t)
+
+
+def is_boxable(ty):
+    return is_boxed(ty) or is_numeric(ty) or is_string(ty) or (
+        is_tuple(ty) and all(is_boxable(element) for element in ty.elements))
+
+
 def is_truthy_type(ty):
-    return is_numeric(ty) or is_string(ty) or is_tuple(ty)
+    return is_numeric(ty) or is_string(ty) or is_tuple(ty) or is_boxed(ty)
 
 
 def promote_numeric(left, right):

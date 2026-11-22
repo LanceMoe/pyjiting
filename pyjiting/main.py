@@ -28,7 +28,7 @@ from .registry import (callback_count, callback_stats as registered_callback_sta
                        registration_id, signatures)
 from .string_runtime import callback_stats, literal_count
 from .types import (TupleType, bool_t, contains_array, double64_t, float32_t,
-                    int32_t, int64_t, make_array_type, str_t)
+                    int32_t, int64_t, list_t, make_array_type, object_t, str_t)
 
 
 DEFAULT_MAX_SPECIALIZATIONS = 64
@@ -106,6 +106,8 @@ def reg(fn: Callable[P, R]) -> Callable[P, R]:
 
 
 def arg_pytype(arg):
+    if isinstance(arg, list):
+        return list_t
     if isinstance(arg, tuple):
         elements = [arg_pytype(element) for element in arg]
         if any(contains_array(element) for element in elements):
@@ -124,6 +126,7 @@ def arg_pytype(arg):
     if isinstance(arg, np.floating) or isinstance(arg, float): return double64_t
     if isinstance(arg, int) and -sys.maxsize - 1 <= arg <= sys.maxsize: return int64_t
     if isinstance(arg, str): return str_t
+    if callable(arg): return object_t
     raise TypeError(f'Unsupported type: {type(arg).__name__}')
 
 
@@ -258,6 +261,9 @@ def compile_specialization(tree, arg_types):
         llfunc = LLVMCodeGen(module, function_type.return_type, arg_types).visit(specialized)
         with state.engine_lock:
             binding_module = llvm.parse_assembly(str(module)); binding_module.verify()
+            # Native code keeps embedded Python object handles for as long as
+            # the engine retains the module, including after a cache clear.
+            setattr(binding_module, 'python_roots', getattr(module, 'python_roots', ()))
             pto = llvm.create_pipeline_tuning_options(speed_level=3); pto.loop_vectorization = True
             pass_builder = llvm.create_pass_builder(state.target_machine, pto)
             unoptimized_ir = str(module)

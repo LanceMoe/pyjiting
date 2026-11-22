@@ -57,11 +57,20 @@ Pyjiting は、関数が最初に呼び出されたタイミングでネイテ�
 | 制御フロー | `if`、`while`、`range`、一次元配列／文字列の反復、`break`、`continue`、ループ `else` | `tests/test_control_flow.py`、`tests/test_extensions.py` |
 | 文字列 | Unicode 値、比較／包含判定、完全なスライス、連結／反復、変換、文字種判定、検索、`ord`／`chr` | `tests/test_string.py`、`tests/test_string_phase2.py` |
 | Tuple | 固定長の異種リテラル／引数／戻り値、ネスト、注釈、定数添字、`len`、真理値、固定長名前アンパック | `tests/test_tuple_phase4.py` |
+| リスト | 異種および入れ子の要素、リテラル、内包表記、`list()`、添字とスライスによる読み書き・削除、反復、標準メソッド、引数と戻り値の同一性 | `tests/test_list.py` |
 | 配列 | 4 種の数値 dtype、安全な添字、多次元 Strided アクセス、一次元反復、多次元全体の `sum`／`any`／`all` スカラーリダクション | `tests/test_array.py`、`tests/test_extensions.py`、`tests/test_numeric_phase3.py` |
 | 組み込み関数 | スカラ／文字列関数と、ネイティブ `math` の三角・平方根・指数・対数・分類・定数 | `tests/test_extensions.py`、`tests/test_string_phase2.py`、`tests/test_numeric_phase3.py` |
 | 定数 | `@jit` 適用時に不変スカラ／文字列のグローバルおよびクロージャ値をキャプチャ | `tests/test_numeric_phase3.py` |
 | アノテーションとコールバック | スカラ／文字列アノテーション、`np.ndarray` dtype の遅延特化、型注釈付き `@reg` | `tests/test_parser.py`、`tests/test_reg_callback.py`、`tests/test_extensions.py` |
 | 検証 | パーサのソース位置保持、推論ルール検証、生成された LLVM モジュールのバリデーション | `tests/test_parser.py`、`tests/test_codegen.py` |
+
+### Python の型とリスト
+
+リストは異なる型の要素、入れ子のリスト、`None` を保持できます。負の添字、スライス、要素やスライスへの代入および削除、starred および入れ子のアンパック、反復、包含判定、比較、連結、反復演算、`sort(key=..., reverse=...)` を含むすべての標準リストメソッドをサポートします。引数や戻り値には Python のリストそのものを使います。同じリストを参照する変数には変更が反映され、スライスと `copy()` は浅いコピーを作ります。`list[T]` はリストを表し、実行時に各要素の型は検査しません。関数の制御フローは LLVM がコンパイルし、リスト操作は Python ランタイムが実行します。
+
+`dict`、`set`、`frozenset`、`complex`、`bytes`、`bytearray`、`memoryview`、任意の Python オブジェクトは、独立した JIT 引数およびネイティブ型としては未対応です。`None` は戻り値や Python ランタイム内の値として使えますが、単独の引数や `int | None` などの共用体注釈は未対応です。`range(...)` はループや `list(range(n))` などの式で使えます。`range` および `slice` オブジェクトは引数として渡せません。tuple の動的添字、スライス、連結、比較、反復と、ネイティブ文字列の `split()` および `encode()` は未対応です。
+
+ネイティブの `int` 引数は符号付き 64 ビット範囲に収まる必要があり、整数演算はオーバーフロー時にラップします。ネイティブの `bool` を Python に返すと、tuple の要素も含めて現在は `0` または `1` になります。Python のリスト内では `bool` 型が維持されます。NumPy 配列の引数は `int32`、`int64`、`float32`、`float64` のみ対応し、ndarray を直接返せません。未対応の引数型は `fallback=True` でもコンパイル前に `TypeError` になります。
 
 ### 数値と配列のセマンティクス
 
@@ -69,7 +78,7 @@ Pyjiting は、任意精度の Python 整数ではなく、固定幅の Int32/In
 
 整数演算は 2 の補数表現による固定幅の挙動に準拠します。特に、符号付き最小整数を -1 で割った場合でも任意精度への昇格は行われず、オーバーフローして符号付き最小整数のままとなります。
 
-配列は descriptor v2 ABI（`data`、`ndim`、`shape`、バイト単位の `strides`、`itemsize`、NumPy flags）を使用します。要素と shape の負添字および境界検査に対応し、転置、slice、負 stride、バイト stride、未アライン view も安全に処理します。実際に読み取り専用配列へ書き込むと `ValueError("assignment destination is read-only")` になります。範囲外は `IndexError`、添字数の不一致は `ValueError` です。配列生成、ブロードキャスト、配列の戻り値、配列全体の ufunc は未対応です。
+配列ディスクリプタは `data`、`ndim`、`shape`、バイト単位の `strides`、`itemsize`、NumPy flags、元の配列への参照を保持します。`list(array)` では NumPy の反復の挙動が維持され、`[array]` では配列の同一性が維持されます。要素と shape の負添字および境界検査に対応し、転置、slice、負 stride、バイト stride、未アライン view も安全に処理します。実際に読み取り専用配列へ書き込むと `ValueError("assignment destination is read-only")` になります。範囲外は `IndexError`、添字数の不一致は `ValueError` です。配列生成、ブロードキャスト、配列の戻り値、配列全体の ufunc は未対応です。
 任意ランクの Strided 配列ではネイティブな全体 `sum`、`any`、`all` を利用でき、int32/float32 の和は int64/float64 へ拡張され、空配列の単位元は Python と一致します。axis リダクションは未対応です。
 
 不変の数値／文字列グローバルおよびクロージャ値は `@jit` 適用時に Core リテラルとして固定されます。ネイティブ `math` は `sin`、`cos`、`sqrt`、`exp`、`log`、`log2`、`log10`、浮動小数点分類、標準定数に対応し、domain/range エラーは JIT エラー ABI で伝播します。
@@ -80,7 +89,7 @@ Tuple は不変の固定長構造型で、要素型は特化シグネチャと�
 
 各特化コードは、デコレートされた Python 関数の識別情報（identity）と型シグネチャから生成される一意の LLVM シンボルを使用します。そのため、同じ関数名を持つ別々の関数が誤ってキャッシュを共有してしまうことはありません。
 
-通常の `@jit` wrapper は元の Python シグネチャを使って位置／キーワード混在呼び出しと不変なデフォルト引数を扱えます。`compiled.specialize(*args)` は実行せずにコンパイルし、`runtime_stats(compiled)`、`inspect_specializations(compiled)`、`get_llvm_ir(compiled, *args)` は関数単位の統計、特化一覧、診断用 IR を提供します。統計にはコンパイル待機、シグネチャごとのコンパイル回数、軽量な失敗情報、文字列 runtime 呼び出し、登録 callback 呼び出しが含まれます。`JITContext` は Notebook や長時間プロセス向けに独立 engine、module/specialization 予算、明示的な close、およびその context で登録した callback の解放を提供します。
+通常の `@jit` wrapper は元の Python シグネチャを使って位置／キーワード混在呼び出しと対応する型のデフォルト引数を扱えます。リストのデフォルト値は呼び出し間で同じオブジェクトを保持します。`compiled.specialize(*args)` は実行せずにコンパイルし、`runtime_stats(compiled)`、`inspect_specializations(compiled)`、`get_llvm_ir(compiled, *args)` は関数単位の統計、特化一覧、診断用 IR を提供します。統計にはコンパイル待機、シグネチャごとのコンパイル回数、軽量な失敗情報、文字列 runtime 呼び出し、登録 callback 呼び出しが含まれます。`JITContext` は Notebook や長時間プロセス向けに独立 engine、module/specialization 予算、明示的な close、およびその context で登録した callback の解放を提供します。
 
 `fallback=True` では frontend、型推論、codegen が未対応の経路だけ元の Python 関数を実行します。`FallbackWarning` は `function`、`reason`、`error_type` を公開し、`fallback_warning` は既定の `"once"`、`"always"`、`"ignore"` から選べます。関数の特化上限、context のリソース上限、close 済み runtime、LLVM 内部エラーは fallback しません。文字列の index と比較はネイティブ UTF-32 経路です。`upper()`、`lower()` など複雑な Unicode 変換は引き続き Python runtime を呼び、その回数は `runtime_stats()['string_callbacks']` で確認できます。
 
@@ -202,6 +211,7 @@ uv run examples/example_float_math.py
 uv run examples/example_array_2d.py
 uv run examples/example_annotations.py
 uv run examples/example_mixed_types.py
+uv run examples/example_lists.py
 
 ```
 
@@ -278,13 +288,13 @@ pyjiting/
 本プロジェクトは研究・教育を目的としたプロトタイプ実装であり、プロダクション環境での利用を想定したものではありません。主な制限事項は以下の通りです。
 
 * ガベージコレクション（GC）との統合はなく、静的に型付け可能な Python の一部サブセットのみをサポートします。
-* `for` は `range`、文字列、一次元配列に対応します。多次元配列の反復は未対応です。コンパイル時に range の step が 0 と評価される定数はエラーとなります。
+* `for` は `range`、リスト、文字列、一次元配列に対応します。コンパイル時に range の step が 0 と分かる場合はエラーになります。
 * 実行時のゼロ除算は `ZeroDivisionError` を送出します。動的にステップ数が 0 となった range は、JIT のエラーハンドリング ABI 経由で `ValueError` を送出します。
 * void 以外の戻り値を持つ JIT 関数は、すべての制御フローパスで値を return する必要があります。
 * 整数のべき乗（`**`）は、指数部がコンパイル時定数である必要があります（動的な負の指数は静的に戻り型を一意に決定できないため）。
 * `@reg` 関数はサポート対象のスカラ型または文字列型アノテーションを完全に備える必要があります。コールバック例外は最外層の Python 呼び出し地点で再送出され、ctypes ABI を跨ぎません。
-* 通常の `@jit` は不変なデフォルト引数と外側のキーワード実引数をサポートします。キーワード専用引数、可変長引数（`*args`, `**kwargs`）、JIT 関数内部のキーワード呼び出しは未対応です。
-* 可変グローバル、List／Dict、starred／ネストしたアンパック対象、動的 tuple 添字、tuple の変更／比較／反復、任意の Python オブジェクト、多次元配列反復、axis、NumPy 配列全体の演算は未対応です。
+* 通常の `@jit` は対応する型のデフォルト引数と外側のキーワード実引数をサポートします。キーワード専用仮引数と可変長仮引数は未対応です。JIT 関数内のリストのソート呼び出しではキーワード引数を使えます。
+* 可変グローバル、多次元配列の反復、axis リダクション、NumPy 配列全体の演算は未対応です。
 
 # 謝辞
 
